@@ -5,7 +5,7 @@ Every scenario below invokes the *real* compiled LangGraph graph
 (`build_trait_discovery_graph()`, unmodified) and, wherever the workflow
 normally would, makes a *real* call to the NVIDIA NIM model — the Capability
 Resolver and Explanation Writer are never monkeypatched or mocked here.
-NVIDIA_NIM_API_KEY (or NVIDIA_API_KEY) must be set in the environment.
+NVIDIA_NIM_API_KEY (or NVIDIA_NIM_API_KEY) must be set in the environment.
 
 This module only *observes* execution via `app.astream(state,
 stream_mode="updates")`, which yields the return value of each node the

@@ -32,7 +32,7 @@ async def main(verbose: bool = False) -> None:
 
 
 def _warn_if_no_api_key() -> None:
-    if not (os.getenv("NVIDIA_NIM_API_KEY") or os.getenv("NVIDIA_API_KEY")):
+    if not (os.getenv("NVIDIA_NIM_API_KEY") or os.getenv("NVIDIA_NIM_API_KEY")):
         print(
             "NOTE: NVIDIA_NIM_API_KEY is not set. Every path below calls the real NIM "
             "model and will raise once it reaches an LLM node. Copy .env.example to "
