@@ -20,6 +20,7 @@ from fastapi import FastAPI
 
 from .mock import TraitMock
 from .schema import AgentRequest, AgentResult, AgentStatus
+from kb.qdrant_store import ensure_collections
 
 app = FastAPI(title="Trait Discovery Agent")
 
@@ -43,3 +44,11 @@ def execute(request: AgentRequest) -> AgentResult:
         return AgentResult(
             status=AgentStatus.FAILED, output=f"Trait Discovery Agent error: {exc}"
         )
+
+
+
+
+@app.on_event("startup")
+async def startup():
+    await ensure_collections()
+
