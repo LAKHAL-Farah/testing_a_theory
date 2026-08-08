@@ -6,7 +6,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
-from .llm import get_llm_client, invoke_with_retry
+from .llm import get_llm_client, invoke_with_retry, summarize_llm_error
 
 logger = logging.getLogger(__name__)
 
@@ -90,5 +90,5 @@ def write_explanation(
         )
         return response.content.strip()
     except Exception as exc:
-        logger.warning("LLM explanation writer failed: %s", exc)
+        logger.info("LLM explanation writer unavailable (%s) — using plain findings text", summarize_llm_error(exc))
         return findings_text

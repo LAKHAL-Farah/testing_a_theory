@@ -211,8 +211,11 @@ async def _query_router_node(state: GenomeAgentState) -> dict[str, Any]:
     if decision is None:
         decision = route_query_fallback(user_question)
 
+    # Only fall back to the router's own guess when no scope was requested
+    # at all. Any explicit value the caller passed in — including
+    # "chromosome_map" — must be respected exactly as given.
     current_scope = state.visualization_scope
-    new_scope = current_scope if current_scope not in ("chromosome_map", "") else decision.visualization_scope
+    new_scope = current_scope if current_scope != "" else decision.visualization_scope
 
     return {
         "needs_metadata": decision.needs_metadata,
@@ -541,9 +544,16 @@ class GenomeAgentLangGraphOrchestrator:
         self,
         user_question: str,
         species_name: str,
-        visualization_scope: str = "chromosome_map",
+        visualization_scope: str = "",
     ) -> GenomeAgentState:
-        """Execute the LangGraph workflow for a user question."""
+        """Execute the LangGraph workflow for a user question.
+
+        visualization_scope: "chromosome_map", "size_comparison",
+            "protein_structure", "none", or "" (default) to let
+            query_router infer the scope from user_question. Any
+            non-empty value is treated as an explicit request and is
+            never overridden by the router.
+        """
 
         initial_state = GenomeAgentState(
             user_question=user_question,
