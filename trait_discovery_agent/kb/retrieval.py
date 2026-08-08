@@ -105,7 +105,7 @@ async def semantic_search(
 
     return [
         RetrievedDocument(id=str(point.id), score=point.score, payload=point.payload or {})
-        for point in response.points                # 3. results -> response.points
+        for point in response.points                
     ]
 
 
