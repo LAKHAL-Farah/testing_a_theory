@@ -252,7 +252,9 @@ async def _species_resolver_node(state: GenomeAgentState) -> dict[str, Any]:
 
 
 def _parallel_kickoff_node(state: GenomeAgentState) -> dict[str, Any]:
-    return {}
+    # No-op fan-out node — must still write to at least one channel
+    # (langgraph enforces this), so we echo back an unchanged value.
+    return {"errors": []}
 
 
 async def _get_genome_metadata_node(state: GenomeAgentState) -> dict[str, Any]:
@@ -323,16 +325,18 @@ async def _get_gene_annotation_node(state: GenomeAgentState) -> dict[str, Any]:
 
 
 def _join_parallel_node(state: GenomeAgentState) -> dict[str, Any]:
-    return {}
+    # No-op join node — must still write to at least one channel.
+    # `errors` uses operator.add as its reducer, so [] is a true no-op merge.
+    return {"errors": []}
 
 
 async def _generate_visualization_node(state: GenomeAgentState) -> dict[str, Any]:
     if state.visualization is not None:
-        return {}
+        return {"errors": []}
 
     scope = state.visualization_scope
     if scope == "none":
-        return {}
+        return {"errors": []}
 
     genome_size = state.metadata["genome_size_bp"] if state.metadata else None
     gene_table = state.annotation["gene_table"] if state.annotation else None
@@ -422,7 +426,7 @@ async def _explanation_writer_node(state: GenomeAgentState) -> dict[str, Any]:
 
 def _error_end_node(state: GenomeAgentState) -> dict[str, Any]:
     logger.info("[error_end] species resolver failed, stopping")
-    return {}
+    return {"errors": []}
 
 
 # ------------------------------------------------------------------

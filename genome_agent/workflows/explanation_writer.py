@@ -6,7 +6,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
-from .llm import get_llm_client
+from .llm import get_llm_client, invoke_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +83,10 @@ def write_explanation(
 
     try:
         client = get_llm_client()
-        response = client.invoke(
-            [SystemMessage(content=_EXPLANATION_SYSTEM_PROMPT), HumanMessage(content=prompt)]
+        response = invoke_with_retry(
+            lambda: client.invoke(
+                [SystemMessage(content=_EXPLANATION_SYSTEM_PROMPT), HumanMessage(content=prompt)]
+            )
         )
         return response.content.strip()
     except Exception as exc:
