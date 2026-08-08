@@ -61,7 +61,20 @@ def write_explanation(
 
     if visualization:
         status = visualization.get("status", "unknown")
-        if status == "completed":
+        comparisons = visualization.get("comparisons")
+        if comparisons:
+            # Real cross-species genome-size comparison data (size_comparison scope).
+            note = visualization.get("note")
+            if note:
+                findings.append(note)
+            comp_lines = [
+                f"{c['common_name']} ({c['scientific_name']}): "
+                f"{c['genome_size_bp'] / 1_000_000_000:.2f} Gb"
+                + (" — this is the queried species" if c.get("is_queried_species") else "")
+                for c in comparisons
+            ]
+            findings.append("Genome size comparison across species:\n" + "\n".join(comp_lines))
+        elif status == "completed":
             findings.append("Visualization was generated successfully.")
         elif status == "needs_agent":
             findings.append(

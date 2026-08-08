@@ -138,6 +138,9 @@ class GenomeAgentOrchestrator:
                 scope=visualization_scope,
                 genome_size_bp=genome_size,
                 gene_table=gene_table,
+                assembly_id=assembly_id,
+                common_name=species.get("common_name"),
+                scientific_name=species.get("scientific_name"),
             )
         except Exception as exc:
             output["errors"].append(f"generate_visualization raised an exception: {exc}")
@@ -343,6 +346,7 @@ async def _generate_visualization_node(state: GenomeAgentState) -> dict[str, Any
 
     genome_size = state.metadata["genome_size_bp"] if state.metadata else None
     gene_table = state.annotation["gene_table"] if state.annotation else None
+    species = state.species or {}
     logger.info("[generate_visualization] scope=%r", scope)
 
     try:
@@ -350,6 +354,9 @@ async def _generate_visualization_node(state: GenomeAgentState) -> dict[str, Any
             scope=scope,
             genome_size_bp=genome_size,
             gene_table=gene_table,
+            assembly_id=state.assembly_id,
+            common_name=species.get("common_name"),
+            scientific_name=species.get("scientific_name"),
         )
     except Exception as exc:
         return {
