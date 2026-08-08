@@ -23,7 +23,4 @@ COPY . ./genome_agent
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
-# Real end-to-end execution of the LangGraph orchestrator across scenarios
-# (happy path, unknown species, NEEDS_AGENT escalation, hard failure,
-# partial results) — not a pytest run.
 CMD ["python", "-m", "genome_agent.scripts.run_orchestrator_scenarios"]

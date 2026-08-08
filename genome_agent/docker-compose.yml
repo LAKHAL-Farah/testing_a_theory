@@ -26,3 +26,24 @@ services:
       - .:/app/genome_agent
     working_dir: /app
     command: python -m pytest genome_agent/tests -v
+
+  # Live check of the real NCBI subagents (species_resolver, genome_metadata,
+  # gene_annotation, sequence_window, and the size_comparison visualization,
+  # which itself calls resolve_species/get_genome_metadata again for the
+  # reference species). No mocking, no LLM involved, no API key needed —
+  # NCBI eutils is unauthenticated. Requires outbound network access to
+  # eutils.ncbi.nlm.nih.gov.
+  #
+  # Species defaults to "tiger"; override at run time, e.g.:
+  #   docker compose run --rm ncbi-live-check --species "house mouse"
+  #   docker compose run --rm ncbi-live-check --species dragon
+  #   docker compose run --rm ncbi-live-check --skip-sequence --skip-comparison
+  ncbi-live-check:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - .:/app/genome_agent
+    working_dir: /app
+    entrypoint: ["python", "-m", "genome_agent.scripts.run_ncbi_live_check"]
+    command: []
