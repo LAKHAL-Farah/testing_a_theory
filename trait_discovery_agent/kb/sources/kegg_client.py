@@ -4,8 +4,8 @@ from schemas.outputs import PathwayEntry
 KEGG_LINK_URL = "https://rest.kegg.jp/link/pathway/{kegg_gene_id}"
 KEGG_GET_URL = "https://rest.kegg.jp/get/{pathway_id}"
 
-
 async def fetch_pathway(kegg_gene_id: str) -> PathwayEntry | None:
+    """Deterministic fallback: first link only. Kept for LLM-outage degradation."""
     async with httpx.AsyncClient(timeout=10.0) as client:
         link_resp = await client.get(KEGG_LINK_URL.format(kegg_gene_id=kegg_gene_id))
         link_resp.raise_for_status()
@@ -22,4 +22,4 @@ async def fetch_pathway(kegg_gene_id: str) -> PathwayEntry | None:
                 pathway_name = text_line.replace("NAME", "").strip()
                 break
 
-    return PathwayEntry(pathway_id=pathway_id, pathway_name=pathway_name)
+        return PathwayEntry(pathway_id=pathway_id, pathway_name=pathway_name)
