@@ -1,23 +1,20 @@
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
-
-import numpy as np
-from langchain_core.prompts import ChatPromptTemplate
 
 from schemas.inputs import GeneMapperInput
 from schemas.outputs import GeneMapperOutput, GOAnnotation
 from schemas.common import AgentStatus
 from kb.qdrant_store import get_cached, upsert_point
 from kb.sources.go_client import (
-    list_go_candidates,
-    resolve_go_term_name,
     fetch_go_annotation,
+    list_go_candidates as list_go_candidates_tool,
+    resolve_go_term_name as resolve_go_term_name_tool,
+    _list_go_candidates_raw as list_go_candidates,
+    _resolve_go_term_name_raw as resolve_go_term_name,
 )
-from kb.embeddings import embed_text
-from workflows.llm import invoke_with_fallback
+from workflows.llm import invoke_tool_loop_with_fallback
 
 logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
@@ -26,13 +23,16 @@ _SYSTEM_PROMPT = (
     "You are the Gene Mapper agent. You're given a trait, a species, and a list of genes "
     "already confirmed relevant to that trait — your job is to attach the correct GO "
     "biological-process annotation to each one.\n\n"
-    "You have a tool that returns ALL biological_process GO candidates QuickGO has for a gene. "
+    "You have a tool (list_go_candidates) that returns ALL biological_process GO "
+    "candidates QuickGO has for a gene, and a tool (resolve_go_term_name) that resolves "
+    "a GO id to its human-readable name if you need to look one up.\n\n"
     "If there's more than one candidate:\n"
     "- Pick the one whose name is most plausibly related to the trait as described.\n"
-    "- If none of the candidates look trait-relevant, still pick the closest one but say so "
-    "plainly in your reasoning — do not invent a better-sounding GO term.\n"
-    "- Never output a go_id or go_name that didn't come back from the tool.\n\n"
-    "If a gene has no candidates, report it as unmatched."
+    "- If none of the candidates look trait-relevant, still pick the closest one but say "
+    "so plainly in your reasoning — do not invent a better-sounding GO term.\n"
+    "- Never output a go_id or go_name that didn't come back from a tool call.\n\n"
+    "When you're ready to answer, reply with ONLY a JSON object with exactly these keys "
+    '(no markdown fences, no extra text): "go_id", "go_name", "reasoning".'
 )
 
 
@@ -42,97 +42,46 @@ async def _llm_pick_candidate(
     candidates: list[dict],
 ) -> tuple[str, str, str]:
     """
-    Ask the LLM to pick the best candidate.
-    Uses invoke_with_fallback so it rotates through all known NIM models.
-    Returns (go_id, go_name, reasoning).
-    """
-    # Pre-resolve every candidate name so the LLM has full context in one shot
-    for c in candidates:
-        if c.get("go_name") is None:
-            c["go_name"] = await resolve_go_term_name(c["go_id"]) or "unknown"
+    Ask the LLM to pick the best candidate via a bind_tools loop (guide §2/§5):
+    the model has direct, typed access to list_go_candidates and
+    resolve_go_term_name and may call either before answering.
 
+    The candidate list already fetched for branching purposes (§8) is included
+    as context so the model doesn't have to re-fetch it, but resolve_go_term_name
+    stays bound in case any candidate's name isn't known yet.
+
+    Returns (go_id, go_name, reasoning). Raises on any failure — the caller is
+    responsible for the deterministic fallback (§9).
+    """
     candidates_text = "\n".join(
-        f"- {c['go_id']}: {c['go_name']}" for c in candidates
+        f"- {c['go_id']}: {c.get('go_name') or '(name unknown, call resolve_go_term_name)'}"
+        for c in candidates
     )
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", _SYSTEM_PROMPT),
-        ("human", (
-            "Trait: {trait_name}\n"
-            "Gene: {gene_symbol}\n\n"
-            "Candidates returned by list_go_candidates:\n{candidates_text}\n\n"
-            "Pick the single most relevant GO biological-process term for this gene "
-            "given the trait. Return ONLY a JSON object with exactly these keys:\n"
-            '- "go_id": the chosen GO id\n'
-            '- "go_name": the chosen GO name\n'
-            '- "reasoning": brief explanation of why you picked this one\n\n'
-            "Do not invent a GO term that is not in the candidates list."
-        )),
-    ])
+    human_prompt = (
+        f"Trait: {trait_name}\n"
+        f"Gene: {gene_symbol}\n\n"
+        f"Candidates already returned by list_go_candidates for this gene:\n{candidates_text}\n\n"
+        "Call resolve_go_term_name for any candidate whose name you don't already know. "
+        "You may also call list_go_candidates again if you want to double-check the list. "
+        "Once you're confident, reply with ONLY the final JSON object."
+    )
 
-    response = await invoke_with_fallback(
-        prompt,
-        {
-            "trait_name": trait_name,
-            "gene_symbol": gene_symbol,
-            "candidates_text": candidates_text,
-        },
+    parsed, _tool_call_log = await invoke_tool_loop_with_fallback(
+        _SYSTEM_PROMPT,
+        human_prompt,
+        tools=[list_go_candidates_tool, resolve_go_term_name_tool],
         temperature=0.1,
     )
 
-    content = response.content
-
-    # ---- extract JSON from response ----
-    parsed: dict | None = None
-    try:
-        if "```json" in content:
-            json_str = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            json_str = content.split("```")[1].split("```")[0]
-        else:
-            json_str = content
-        parsed = json.loads(json_str.strip())
-    except json.JSONDecodeError:
-        logger.warning("LLM response for %s was not valid JSON: %s", gene_symbol, content)
-
-    if parsed is None:
-        raise RuntimeError("Could not parse LLM response")
-
     picked_id = parsed.get("go_id")
-    picked_name = parsed.get("go_name")
+    picked_name = parsed.get("go_name") or "unknown"
     reasoning = parsed.get("reasoning", "")
 
-    return picked_id, picked_name or "unknown", reasoning
+    if not picked_id:
+        raise RuntimeError(f"Model did not return a go_id: {parsed!r}")
 
-
-async def _embedding_pick_candidate(trait_name: str, candidates: list[dict]) -> tuple[str, str]:
-    """
-    When LLM is unavailable, use embedding cosine similarity to pick the closest candidate.
-    Vectors are already normalized by embed_text(), so dot product == cosine similarity.
-    """
-    trait_vec = np.array(await embed_text(trait_name))
-
-    best_id, best_name, best_score = None, None, -1.0
-
-    for c in candidates:
-        name = c.get("go_name") or await resolve_go_term_name(c["go_id"]) or "unknown"
-        if name == "unknown":
-            continue
-        cand_vec = np.array(await embed_text(name))
-        score = float(np.dot(trait_vec, cand_vec))
-        if score > best_score:
-            best_score = score
-            best_id = c["go_id"]
-            best_name = name
-
-    if best_id is None:
-        raise RuntimeError("Embedding fallback found no valid candidates")
-
-    logger.info(
-        "Embedding fallback picked %s (%s) for trait '%s' (score=%.3f)",
-        best_id, best_name, trait_name, best_score,
-    )
-    return best_id, best_name
+    return picked_id, picked_name, reasoning
 
 
 async def gene_mapper_agent(input: GeneMapperInput) -> GeneMapperOutput:
@@ -142,10 +91,11 @@ async def gene_mapper_agent(input: GeneMapperInput) -> GeneMapperOutput:
     for gene in input.gene_list:
         uniprot_accession = input.context.get("uniprot_accessions", {}).get(gene)
         if not uniprot_accession:
+            # §8: nothing to disambiguate — never reaches the LLM.
             unmatched.append(gene)
             continue
 
-        # ---- fetch candidates from QuickGO (with one retry) ----
+        # ---- fetch candidates from QuickGO (with one retry, §9) ----
         candidates: list[dict] = []
         try:
             candidates = await list_go_candidates(gene, uniprot_accession)
@@ -165,13 +115,13 @@ async def gene_mapper_agent(input: GeneMapperInput) -> GeneMapperOutput:
         # ---- single candidate: straight through, no LLM (§8) ----
         if len(candidates) == 1:
             go_id = candidates[0]["go_id"]
-            go_name = candidates[0].get("go_name") or await resolve_go_term_name(go_id) or "unknown"
-            if go_name == "unknown":
+            go_name = candidates[0].get("go_name") or await resolve_go_term_name(go_id)
+            if not go_name:
                 unmatched.append(gene)
                 continue
             entry = GOAnnotation(gene_symbol=gene, go_id=go_id, go_name=go_name)
 
-        # ---- multi-candidate: LLM pick (§8) ----
+        # ---- multi-candidate: LLM pick via bind_tools (§8) ----
         else:
             try:
                 go_id, go_name, reasoning = await _llm_pick_candidate(
@@ -186,22 +136,15 @@ async def gene_mapper_agent(input: GeneMapperInput) -> GeneMapperOutput:
                 logger.info("LLM picked %s (%s) for %s: %s", go_id, go_name, gene, reasoning)
                 entry = GOAnnotation(gene_symbol=gene, go_id=go_id, go_name=go_name)
             except Exception as exc:
-                # ---- Tier 2: LLM failed → embedding similarity fallback ----
-                logger.warning("LLM pick failed for %s, trying embedding fallback: %s", gene, exc)
-                try:
-                    go_id, go_name = await _embedding_pick_candidate(input.trait_name, candidates)
-                    entry = GOAnnotation(gene_symbol=gene, go_id=go_id, go_name=go_name)
-                except Exception as exc2:
-                    # ---- Tier 3: everything failed → deterministic first candidate (§9) ----
-                    logger.warning(
-                        "Embedding fallback also failed for %s, falling back to first candidate: %s",
-                        gene, exc2,
-                    )
-                    fallback = await fetch_go_annotation(gene, uniprot_accession)
-                    if fallback is None:
-                        unmatched.append(gene)
-                        continue
-                    entry = fallback
+                # ---- LLM/NIM unavailable or invalid → deterministic fallback (§9) ----
+                logger.warning(
+                    "LLM pick failed for %s, falling back to first candidate: %s", gene, exc
+                )
+                fallback = await fetch_go_annotation(gene, uniprot_accession)
+                if fallback is None:
+                    unmatched.append(gene)
+                    continue
+                entry = fallback
 
         # ---- cache layer (§6) ----
         dedup_key = f"go:{entry.go_id}:{entry.gene_symbol}"
