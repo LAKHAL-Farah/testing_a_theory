@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -9,30 +10,54 @@ from schemas.common import AgentStatus
 from kb.qdrant_store import get_cached, upsert_point
 from kb.sources.go_client import (
     fetch_go_annotation,
-    list_go_candidates as list_go_candidates_tool,
-    resolve_go_term_name as resolve_go_term_name_tool,
     _list_go_candidates_raw as list_go_candidates,
     _resolve_go_term_name_raw as resolve_go_term_name,
 )
-from workflows.llm import invoke_tool_loop_with_fallback
+from workflows.llm import invoke_json_with_fallback
 
 logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
 
+# Cap concurrent QuickGO name lookups — this is also what was tripping
+# QuickGO's own 429 rate limit when several names were resolved back-to-back
+# inside the LLM tool loop.
+_NAME_RESOLVE_CONCURRENCY = 3
+
+
+async def _resolve_missing_go_names(candidates: list[dict]) -> list[dict]:
+    """Fill in go_name for every candidate up front.
+
+    list_go_candidates always returns go_name=None (§ go_client — QuickGO's
+    search endpoint doesn't include names), so without this the LLM has to
+    burn a tool-call turn per candidate just to find out what each GO id
+    means before it can decide anything. Resolving them here means the model
+    sees a fully-named list on turn 1 and — in the common case — doesn't
+    need to call a tool at all.
+    """
+    sem = asyncio.Semaphore(_NAME_RESOLVE_CONCURRENCY)
+
+    async def _fill(c: dict) -> dict:
+        if c.get("go_name"):
+            return c
+        async with sem:
+            name = await resolve_go_term_name(c["go_id"])
+        return {**c, "go_name": name}
+
+    return await asyncio.gather(*(_fill(c) for c in candidates))
+
 _SYSTEM_PROMPT = (
     "You are the Gene Mapper agent. You're given a trait, a species, and a list of genes "
     "already confirmed relevant to that trait — your job is to attach the correct GO "
-    "biological-process annotation to each one.\n\n"
-    "You have a tool (list_go_candidates) that returns ALL biological_process GO "
-    "candidates QuickGO has for a gene, and a tool (resolve_go_term_name) that resolves "
-    "a GO id to its human-readable name if you need to look one up.\n\n"
+    "biological-process annotation to each one, choosing from a candidate list that has "
+    "already been resolved to human-readable names.\n\n"
     "If there's more than one candidate:\n"
     "- Pick the one whose name is most plausibly related to the trait as described.\n"
     "- If none of the candidates look trait-relevant, still pick the closest one but say "
     "so plainly in your reasoning — do not invent a better-sounding GO term.\n"
-    "- Never output a go_id or go_name that didn't come back from a tool call.\n\n"
-    "When you're ready to answer, reply with ONLY a JSON object with exactly these keys "
-    '(no markdown fences, no extra text): "go_id", "go_name", "reasoning".'
+    "- Only report a go_id and go_name that appear in the candidate list below — never "
+    "one you recall from elsewhere.\n\n"
+    "Reply with ONLY a JSON object with exactly these keys (no markdown fences, no extra "
+    'text): "go_id", "go_name", "reasoning".'
 )
 
 
@@ -42,35 +67,30 @@ async def _llm_pick_candidate(
     candidates: list[dict],
 ) -> tuple[str, str, str]:
     """
-    Ask the LLM to pick the best candidate via a bind_tools loop (guide §2/§5):
-    the model has direct, typed access to list_go_candidates and
-    resolve_go_term_name and may call either before answering.
-
-    The candidate list already fetched for branching purposes (§8) is included
-    as context so the model doesn't have to re-fetch it, but resolve_go_term_name
-    stays bound in case any candidate's name isn't known yet.
+    Ask the LLM to pick the best candidate. Candidates are pre-resolved (every
+    go_name already filled in by _resolve_missing_go_names), so this is a
+    single tool-free JSON completion — no bind_tools loop, no turn limit, no
+    risk of the model re-fetching unnamed data it doesn't need.
 
     Returns (go_id, go_name, reasoning). Raises on any failure — the caller is
     responsible for the deterministic fallback (§9).
     """
     candidates_text = "\n".join(
-        f"- {c['go_id']}: {c.get('go_name') or '(name unknown, call resolve_go_term_name)'}"
+        f"- {c['go_id']}: {c.get('go_name') or '(name unavailable)'}"
         for c in candidates
     )
 
     human_prompt = (
         f"Trait: {trait_name}\n"
         f"Gene: {gene_symbol}\n\n"
-        f"Candidates already returned by list_go_candidates for this gene:\n{candidates_text}\n\n"
-        "Call resolve_go_term_name for any candidate whose name you don't already know. "
-        "You may also call list_go_candidates again if you want to double-check the list. "
-        "Once you're confident, reply with ONLY the final JSON object."
+        f"Candidates (this is the complete list — do not assume others exist):\n"
+        f"{candidates_text}\n\n"
+        "Reply with ONLY the final JSON object."
     )
 
-    parsed, _tool_call_log = await invoke_tool_loop_with_fallback(
+    parsed = await invoke_json_with_fallback(
         _SYSTEM_PROMPT,
         human_prompt,
-        tools=[list_go_candidates_tool, resolve_go_term_name_tool],
         temperature=0.1,
     )
 
@@ -123,6 +143,7 @@ async def gene_mapper_agent(input: GeneMapperInput) -> GeneMapperOutput:
 
         # ---- multi-candidate: LLM pick via bind_tools (§8) ----
         else:
+            candidates = await _resolve_missing_go_names(candidates)
             try:
                 go_id, go_name, reasoning = await _llm_pick_candidate(
                     input.trait_name, gene, candidates
@@ -197,4 +218,4 @@ async def mock_gene_mapper(input: GeneMapperInput) -> GeneMapperOutput:
             unmatched.append(gene)
 
     status = AgentStatus.FAILED if (not annotations or unmatched) else AgentStatus.COMPLETED
-    return GeneMapperOutput(status=status, go_annotations=annotations, unmatched_genes=unmatched)
+    return GeneMapperOutput(status=status, go_annotations=annotations, unmatched_genes=unmatched) 

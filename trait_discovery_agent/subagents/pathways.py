@@ -11,6 +11,7 @@ For each gene:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -20,29 +21,51 @@ from schemas.common import AgentStatus
 from kb.qdrant_store import get_cached, upsert_point
 from kb.sources.kegg_client import (
     fetch_pathway,
-    list_pathway_candidates as list_pathway_candidates_tool,
-    fetch_pathway_name as fetch_pathway_name_tool,
     _list_pathway_candidates_raw as list_pathway_candidates,
     _fetch_pathway_name_raw as fetch_pathway_name,
 )
-from workflows.llm import invoke_tool_loop_with_fallback
+from workflows.llm import invoke_json_with_fallback
 
 logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
 
+# Cap concurrent KEGG name lookups so a gene with many candidate pathways
+# doesn't fire off a dozen requests at once and trip KEGG's own rate limits.
+_NAME_RESOLVE_CONCURRENCY = 3
+
+
+async def _resolve_missing_pathway_names(candidates: list[dict]) -> list[dict]:
+    """Fill in pathway_name for every candidate up front.
+
+    list_pathway_candidates never returns names (§ kegg_client), so without
+    this the LLM has to spend a tool-call turn per candidate just to find out
+    what each one is called before it can even start deciding. Resolving
+    them here means the model sees a fully-named list on turn 1 and — in the
+    common case — doesn't need to call a tool at all.
+    """
+    sem = asyncio.Semaphore(_NAME_RESOLVE_CONCURRENCY)
+
+    async def _fill(c: dict) -> dict:
+        if c.get("pathway_name"):
+            return c
+        async with sem:
+            name = await fetch_pathway_name(c["pathway_id"])
+        return {**c, "pathway_name": name}
+
+    return await asyncio.gather(*(_fill(c) for c in candidates))
+
 _SYSTEM_PROMPT = (
-    "You are the Pathways agent. Given a gene, a list of KEGG pathways, and the trait "
-    "under investigation, select the single most trait-relevant pathway.\n\n"
-    "You have a tool (list_pathway_candidates) that returns EVERY KEGG pathway linked to "
-    "a gene, and a tool (fetch_pathway_name) that resolves a pathway id to its "
-    "human-readable NAME field if you need to look one up.\n\n"
+    "You are the Pathways agent. Given a gene, a list of KEGG pathways (already "
+    "resolved to their human-readable names), and the trait under investigation, "
+    "select the single most trait-relevant pathway.\n\n"
     "Rules:\n"
     "- Prefer the pathway whose name plausibly relates to the trait.\n"
     "- If none look trait-relevant, keep the FIRST one in the list and say so in your "
     "reasoning. Never fabricate a better-sounding match.\n"
-    "- Never report a pathway_id or pathway_name that wasn't in a tool result.\n\n"
-    "When you're ready to answer, reply with ONLY a JSON object with exactly these keys "
-    '(no markdown fences, no extra text): "pathway_id", "pathway_name", "reasoning".'
+    "- Only report a pathway_id and pathway_name that appear in the candidate list below "
+    "— never one you recall from elsewhere.\n\n"
+    "Reply with ONLY a JSON object with exactly these keys (no markdown fences, no extra "
+    'text): "pathway_id", "pathway_name", "reasoning".'
 )
 
 
@@ -52,31 +75,30 @@ async def _llm_pick_pathway(
     candidates: list[dict],
 ) -> tuple[str, str, str]:
     """
-    Ask the LLM to pick the best pathway via a bind_tools loop (guide §2/§5):
-    the model has direct, typed access to list_pathway_candidates and
-    fetch_pathway_name and may call either before answering.
+    Ask the LLM to pick the best pathway. Candidates are pre-resolved (every
+    pathway_name already filled in by _resolve_missing_pathway_names), so this
+    is a single tool-free JSON completion — no bind_tools loop, no turn limit,
+    no risk of the model re-fetching unnamed data it doesn't need.
 
     Returns (pathway_id, pathway_name, reasoning). Raises on any failure — the
     caller is responsible for the deterministic fallback (§9).
     """
     candidates_text = "\n".join(
-        f"- {c['pathway_id']}: {c.get('pathway_name') or '(name unknown, call fetch_pathway_name)'}"
+        f"- {c['pathway_id']}: {c.get('pathway_name') or '(name unavailable)'}"
         for c in candidates
     )
 
     human_prompt = (
         f"Gene symbol: {gene_symbol}\n"
         f"Trait under investigation: {trait_name}\n\n"
-        f"Candidate pathways already returned by list_pathway_candidates:\n{candidates_text}\n\n"
-        "Call fetch_pathway_name for any candidate whose name you don't already know. "
-        "You may also call list_pathway_candidates again if you want to double-check the "
-        "list. Once you're confident, reply with ONLY the final JSON object."
+        f"Candidate pathways (this is the complete list — do not assume others exist):\n"
+        f"{candidates_text}\n\n"
+        "Reply with ONLY the final JSON object."
     )
 
-    parsed, _tool_call_log = await invoke_tool_loop_with_fallback(
+    parsed = await invoke_json_with_fallback(
         _SYSTEM_PROMPT,
         human_prompt,
-        tools=[list_pathway_candidates_tool, fetch_pathway_name_tool],
         temperature=0.1,
     )
 
@@ -113,6 +135,7 @@ async def _select_pathway_for_gene(
         )
 
     # --- several links: LLM pick via bind_tools (§8) ---
+    candidates = await _resolve_missing_pathway_names(candidates)
     try:
         pathway_id, pathway_name, reasoning = await _llm_pick_pathway(
             trait_name, gene, candidates

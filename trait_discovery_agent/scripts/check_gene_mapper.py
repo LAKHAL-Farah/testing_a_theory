@@ -41,7 +41,7 @@ async def main():
         instruction="Map genes to GO biological process",
         context={
             "uniprot_accessions": {
-                "FGF5": "P48145",
+                "FGF5": "P12034",
                 "HR": "O43593",
             }
         },
