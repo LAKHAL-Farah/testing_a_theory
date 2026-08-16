@@ -47,3 +47,26 @@ services:
     working_dir: /app
     entrypoint: ["python", "-m", "genome_agent.scripts.run_ncbi_live_check"]
     command: []
+
+  # Full integration demo: retrieval (real NCBI) + sub-orchestrator<->agent
+  # communication (visualization calling other subagents live, and
+  # capability_resolver escalating to an agent picked from agent_cards/) +
+  # end-to-end data flow through the compiled graph, all in one run with
+  # pass/fail assertions instead of just a printed trace. Exits non-zero if
+  # any check fails, so it also works as a CI smoke test. Requires outbound
+  # network access to eutils.ncbi.nlm.nih.gov. NVIDIA_API_KEY optional (see
+  # genome-agent-scenarios above — same fallback behavior applies).
+  #
+  # Species defaults to "tiger"; override at run time, e.g.:
+  #   docker compose run --rm full-integration-demo --species "house mouse"
+  #   docker compose run --rm full-integration-demo --part suborchestrator
+  #   docker compose run --rm full-integration-demo --part e2e
+  full-integration-demo:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - .:/app/genome_agent
+    working_dir: /app
+    entrypoint: ["python", "-m", "genome_agent.scripts.run_full_integration_demo"]
+    command: []
