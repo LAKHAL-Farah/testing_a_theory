@@ -23,6 +23,7 @@ from ..subagents.gene_annotation import (
     _rank_gene_table,
     _verify_grounding,
 )
+from ..workflows.gene_annotation_resolver import GeneAnnotationStrategy
 
 # Opt-in live NCBI tests
 _skip_reason = "RUN_NCBI_LIVE_TESTS not set — skipping live NCBI eutils tests"
@@ -145,10 +146,11 @@ class TestRankGeneTable:
 
 
 class TestGetGeneAnnotationRanking:
-    """End-to-end: get_gene_annotation() applies the ranking before returning."""
+    """End-to-end: get_gene_annotation() applies ranking only when the LLM
+    strategy succeeded (§3.9: total fallback stays unranked, first-N as-is)."""
 
     @pytest.mark.asyncio
-    async def test_get_gene_annotation_ranks_real_descriptions_first(self):
+    async def test_get_gene_annotation_ranks_real_descriptions_first_when_llm_succeeds(self):
         mock_search_response = MagicMock()
         mock_search_response.json.return_value = {
             "esearchresult": {"idlist": ["1", "2", "3"]}
@@ -171,8 +173,16 @@ class TestGetGeneAnnotationRanking:
             }
         }
 
-        with patch("backend.agents.genome_agent.subagents.gene_annotation.ncbi_get") as mock_ncbi:
+        with patch("genome_agent.subagents.gene_annotation.ncbi_get") as mock_ncbi, patch(
+            "genome_agent.subagents.gene_annotation.resolve_gene_annotation_strategy"
+        ) as mock_strategy:
             mock_ncbi.side_effect = [mock_search_response, mock_fetch_response]
+            # Simulate the LLM strategy call succeeding (this is what gates ranking).
+            mock_strategy.return_value = GeneAnnotationStrategy(
+                search_keyword=None,
+                ranking_criteria="prefer well-annotated genes",
+                reasoning="Broad question, no specific trait named.",
+            )
 
             result = await get_gene_annotation(
                 "GCF_000464555.1",
@@ -181,10 +191,51 @@ class TestGetGeneAnnotationRanking:
 
             assert result["gene_list"][0] == "TP53", (
                 "the gene with a real description must be ranked ahead of "
-                "the uncharacterized ones"
+                "the uncharacterized ones when the LLM strategy succeeded"
             )
             assert set(result["gene_list"]) == {"LOC001", "TP53", "LOC003"}, (
                 "ranking must not drop any genes"
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_gene_annotation_stays_unranked_when_llm_unavailable(self):
+        """§3.9: total fallback (no LLM at all) returns first-N as-is,
+        deliberately NOT reordered — 'no ranking, first 50 as-is'."""
+        mock_search_response = MagicMock()
+        mock_search_response.json.return_value = {
+            "esearchresult": {"idlist": ["1", "2", "3"]}
+        }
+
+        mock_fetch_response = MagicMock()
+        mock_fetch_response.json.return_value = {
+            "result": {
+                # Deliberately ordered LOC (uncharacterized) BEFORE TP53
+                # (informative) — if ranking were applied, TP53 would move
+                # to the front. The fallback must leave this order alone.
+                "1": {"name": "LOC001", "description": "", "chromosome": "1"},
+                "2": {
+                    "name": "TP53",
+                    "description": "tumor suppressor gene",
+                    "chromosome": "17",
+                },
+                "3": {"name": "LOC003", "description": "", "chromosome": "3"},
+            }
+        }
+
+        with patch("genome_agent.subagents.gene_annotation.ncbi_get") as mock_ncbi, patch(
+            "genome_agent.subagents.gene_annotation.resolve_gene_annotation_strategy"
+        ) as mock_strategy:
+            mock_ncbi.side_effect = [mock_search_response, mock_fetch_response]
+            mock_strategy.return_value = None  # simulates LLM client unavailable
+
+            result = await get_gene_annotation(
+                "GCF_000464555.1",
+                user_question="Show me gene annotations for the tiger",
+            )
+
+            assert result["gene_list"] == ["LOC001", "TP53", "LOC003"], (
+                "total fallback must preserve NCBI's original order, not rank "
+                "informative genes ahead of uncharacterized ones"
             )
 
 
@@ -271,7 +322,7 @@ class TestGetGeneAnnotation:
             }
         }
 
-        with patch("backend.agents.genome_agent.subagents.gene_annotation.ncbi_get") as mock_ncbi:
+        with patch("genome_agent.subagents.gene_annotation.ncbi_get") as mock_ncbi:
             # First call is search, second is fetch
             mock_ncbi.side_effect = [mock_search_response, mock_fetch_response]
 
@@ -307,7 +358,7 @@ class TestGetGeneAnnotation:
             }
         }
 
-        with patch("backend.agents.genome_agent.subagents.gene_annotation.ncbi_get") as mock_ncbi:
+        with patch("genome_agent.subagents.gene_annotation.ncbi_get") as mock_ncbi:
             mock_ncbi.side_effect = [mock_search_response, mock_fetch_response]
 
             result = await get_gene_annotation(
@@ -327,7 +378,7 @@ class TestGetGeneAnnotation:
             "esearchresult": {"idlist": []}
         }
 
-        with patch("backend.agents.genome_agent.subagents.gene_annotation.ncbi_get") as mock_ncbi:
+        with patch("genome_agent.subagents.gene_annotation.ncbi_get") as mock_ncbi:
             mock_ncbi.return_value = mock_search_response
 
             result = await get_gene_annotation(

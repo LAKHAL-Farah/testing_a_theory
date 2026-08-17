@@ -146,9 +146,9 @@ class TestResolveReferenceSpecies:
         }
 
         with patch(
-            "backend.agents.genome_agent.subagents.visualization.resolve_species"
+            "genome_agent.subagents.visualization.resolve_species"
         ) as mock_rs, patch(
-            "backend.agents.genome_agent.subagents.visualization.get_genome_metadata"
+            "genome_agent.subagents.visualization.get_genome_metadata"
         ) as mock_gm:
             mock_rs.return_value = mock_species_result
             mock_gm.return_value = mock_metadata_result
@@ -177,9 +177,9 @@ class TestResolveReferenceSpecies:
         }
 
         with patch(
-            "backend.agents.genome_agent.subagents.visualization.resolve_species"
+            "genome_agent.subagents.visualization.resolve_species"
         ) as mock_rs, patch(
-            "backend.agents.genome_agent.subagents.visualization.get_genome_metadata"
+            "genome_agent.subagents.visualization.get_genome_metadata"
         ) as mock_gm:
             # First call returns valid result, second raises Exception
             mock_rs.side_effect = [mock_species_result, Exception("Not found")]
@@ -231,7 +231,7 @@ class TestGenerateVisualization:
             {"gene_name": "Trp53", "location": "chr17", "function": "tumor suppressor"},
         ]
         with patch(
-            "backend.agents.genome_agent.subagents.visualization.resolve_chromosome_highlight"
+            "genome_agent.subagents.visualization.resolve_chromosome_highlight"
         ) as mock_resolve:
             mock_resolve.return_value = SimpleNamespace(
                 highlight_gene="Trp53", reasoning="Question asks about Trp53."
@@ -257,7 +257,7 @@ class TestGenerateVisualization:
             {"gene_name": "ABC", "location": "chr1", "function": "Function A"},
         ]
         with patch(
-            "backend.agents.genome_agent.subagents.visualization.resolve_chromosome_highlight"
+            "genome_agent.subagents.visualization.resolve_chromosome_highlight"
         ) as mock_resolve:
             mock_resolve.return_value = None  # simulate LLM unavailable
             result = await generate_visualization(
@@ -323,9 +323,9 @@ class TestGenerateVisualization:
         }
 
         with patch(
-            "backend.agents.genome_agent.subagents.visualization.resolve_visualization_references"
+            "genome_agent.subagents.visualization.resolve_visualization_references"
         ) as mock_resolver, patch(
-            "backend.agents.genome_agent.subagents.visualization.resolve_reference_species"
+            "genome_agent.subagents.visualization.resolve_reference_species"
         ) as mock_resolve_refs:
             # LLM picks references
             mock_resolver.return_value = MagicMock(
@@ -360,9 +360,9 @@ class TestGenerateVisualization:
     async def test_generate_visualization_size_comparison_no_refs(self):
         """Test size_comparison when no references are resolved."""
         with patch(
-            "backend.agents.genome_agent.subagents.visualization.resolve_visualization_references"
+            "genome_agent.subagents.visualization.resolve_visualization_references"
         ) as mock_resolver, patch(
-            "backend.agents.genome_agent.subagents.visualization.resolve_reference_species"
+            "genome_agent.subagents.visualization.resolve_reference_species"
         ) as mock_resolve_refs:
             mock_resolver.return_value = MagicMock(
                 reference_species=["fictional_species"],

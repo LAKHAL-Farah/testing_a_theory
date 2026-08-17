@@ -242,9 +242,9 @@ async def get_gene_annotation(
         5. Return results
     """
     # Step 1: Get search strategy from LLM
-    strategy = resolve_gene_annotation_strategy(user_question, assembly_id)
-    if strategy is None:
-        strategy = resolve_gene_annotation_strategy_fallback(user_question)
+    llm_strategy = resolve_gene_annotation_strategy(user_question, assembly_id)
+    used_llm_strategy = llm_strategy is not None
+    strategy = llm_strategy or resolve_gene_annotation_strategy_fallback(user_question)
     
     logger.info(
         "[gene_annotation] strategy: keyword=%r, reasoning=%r",
@@ -300,9 +300,13 @@ async def get_gene_annotation(
             "gene_list": [],
         }
     
-    # Step 5: Rank real-description genes ahead of uncharacterized ones
-    # (never drops rows, only reorders — see §3.3/§3.4/§3.8).
-    gene_table = _rank_gene_table(gene_table, strategy.ranking_criteria)
+    # Step 5: Rank real-description genes ahead of uncharacterized ones —
+    # but only when the LLM strategy actually succeeded. Per §3.9, the
+    # total-fallback path (no LLM at all) stays deterministic and simple:
+    # "no ranking, first 50 as-is — worse, but never broken." Ranking is
+    # part of the LLM-guided path, not a universal post-process.
+    if used_llm_strategy:
+        gene_table = _rank_gene_table(gene_table, strategy.ranking_criteria)
 
     # Step 6: Build gene_list (must be exactly named for cross-agent contract)
     gene_list = [row["gene_name"] for row in gene_table]
