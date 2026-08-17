@@ -172,13 +172,24 @@ def resolve_chromosome_highlight(
         if tool_calls:
             call = tool_calls[0]
             result = ChromosomeHighlightOutput(**call["args"])
-            # Never trust an invented gene name, even from the LLM.
-            if result.highlight_gene and result.highlight_gene not in candidate_gene_names:
-                logger.warning(
-                    "LLM proposed highlight_gene %r not in candidate list — dropping",
-                    result.highlight_gene,
-                )
-                result.highlight_gene = None
+            # Never trust an invented gene name, even from the LLM — but
+            # match case-insensitively first (the LLM may return different
+            # casing, e.g. "TRP53" vs "Trp53") and snap to the candidate
+            # list's canonical casing, the same way the fallback heuristic
+            # and the renderer already do. Only drop it if there's truly no
+            # match by name, ignoring case.
+            if result.highlight_gene:
+                canonical_by_lower = {name.lower(): name for name in candidate_gene_names}
+                canonical = canonical_by_lower.get(result.highlight_gene.lower())
+                if canonical is None:
+                    logger.warning(
+                        "LLM proposed highlight_gene %r not in candidate list (even "
+                        "case-insensitively) — dropping",
+                        result.highlight_gene,
+                    )
+                    result.highlight_gene = None
+                else:
+                    result.highlight_gene = canonical
             return result
     except Exception as exc:
         logger.info(

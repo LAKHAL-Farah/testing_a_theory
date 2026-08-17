@@ -173,10 +173,25 @@ async def generate_visualization(
         gene_names = [g.get("gene_name", "") for g in gene_table if g.get("gene_name")]
 
         highlight_result = resolve_chromosome_highlight(user_question or "", gene_names)
-        if highlight_result is None:
-            highlight_result = resolve_chromosome_highlight_fallback(
+        # Fall back not only when the LLM was totally unavailable (None),
+        # but also when it "succeeded" yet came back empty-handed
+        # (highlight_gene=None) despite candidate genes existing — e.g. its
+        # proposed name got dropped for not matching the candidate list, or
+        # it just declined to pick one. The deterministic heuristic is a
+        # reliable second opinion in either case, and never invents a name
+        # outside candidate_gene_names, so it's safe to prefer its answer
+        # over an empty LLM result rather than giving up on highlighting
+        # entirely.
+        if highlight_result is None or (
+            highlight_result.highlight_gene is None and gene_names
+        ):
+            fallback_result = resolve_chromosome_highlight_fallback(
                 user_question or "", gene_names
             )
+            if fallback_result.highlight_gene is not None:
+                highlight_result = fallback_result
+            elif highlight_result is None:
+                highlight_result = fallback_result
 
         highlight_gene = highlight_result.highlight_gene
         logger.info(

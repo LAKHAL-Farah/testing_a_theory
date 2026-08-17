@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -57,7 +58,62 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from unittest.mock import patch
 
+# Root stays at WARNING so third-party libraries (httpx, langchain internals,
+# etc.) don't spam the console. The two loggers that actually tell us whether
+# the *real* LLM call succeeded or silently fell back are captured separately
+# below at INFO, regardless of this root setting — see _capture_llm_logs().
 logging.getLogger().setLevel(logging.WARNING)
+
+_RESOLVER_LOGGER_NAME = "genome_agent.workflows.gene_annotation_resolver"
+_LLM_LOGGER_NAME = "genome_agent.workflows.llm"
+
+
+class _RecordCollector(logging.Handler):
+    """Collects log records in memory instead of printing them, so a case
+    can inspect exactly what the resolver/llm modules logged internally —
+    including INFO-level messages that the root WARNING threshold would
+    otherwise swallow silently."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@contextlib.contextmanager
+def _capture_llm_logs():
+    """Temporarily raise the resolver/llm loggers to INFO and capture their
+    output, so real LLM failures (bad key, wrong model name, network block,
+    timeout, etc.) are visible in the case's own report instead of being
+    silently absorbed by the fallback and hidden behind a 'PASS'."""
+    collector = _RecordCollector()
+    collector.setLevel(logging.INFO)
+    loggers = [logging.getLogger(_RESOLVER_LOGGER_NAME), logging.getLogger(_LLM_LOGGER_NAME)]
+    saved = [(lg, lg.level) for lg in loggers]
+    for lg in loggers:
+        lg.addHandler(collector)
+        lg.setLevel(logging.INFO)
+    try:
+        yield collector
+    finally:
+        for lg, level in saved:
+            lg.removeHandler(collector)
+            lg.setLevel(level)
+
+
+def _summarize_llm_usage(collector: "_RecordCollector") -> str:
+    """Turn captured log records into one clear line: did this case's call
+    actually use the live LLM, or silently fall back — and if it fell back,
+    why?"""
+    for record in collector.records:
+        message = record.getMessage()
+        if record.name == _RESOLVER_LOGGER_NAME and "LLM client unavailable" in message:
+            return f"FALLBACK (client could not be built: {message.split(': ', 1)[-1]})"
+        if record.name == _RESOLVER_LOGGER_NAME and "resolver unavailable" in message:
+            return f"FALLBACK (invoke failed: {message.split('(', 1)[-1].rsplit(')', 1)[0]})"
+    return "REAL LLM (no fallback logged)"
 
 _WIDTH = 72
 
@@ -116,10 +172,12 @@ async def case_general_question_ranks_real_descriptions_first(assembly_id: str) 
     detail: list[str] = []
 
     try:
-        result = await get_gene_annotation(
-            assembly_id,
-            user_question="Show me gene annotations for this species",
-        )
+        with _capture_llm_logs() as collector:
+            result = await get_gene_annotation(
+                assembly_id,
+                user_question="Show me gene annotations for this species",
+            )
+        detail.append(f"LLM path actually taken: {_summarize_llm_usage(collector)}")
         gene_table = result["gene_table"]
         detail.append(f"NCBI returned {len(gene_table)} genes for assembly {assembly_id!r}")
 
@@ -175,12 +233,13 @@ async def case_trait_specific_question_uses_keyword(assembly_id: str) -> CaseRes
         return real_ncbi_get(params)
 
     try:
-        with patch(f"{_MOD}.ncbi_get", side_effect=_spy_ncbi_get):
+        with patch(f"{_MOD}.ncbi_get", side_effect=_spy_ncbi_get), _capture_llm_logs() as collector:
             await get_gene_annotation(
                 assembly_id,
                 user_question="Which genes affect fur color in this species?",
             )
 
+        detail.append(f"LLM path actually taken: {_summarize_llm_usage(collector)}")
         term = captured_terms[0] if captured_terms else ""
         detail.append(f"esearch term actually sent to NCBI: {term!r}")
 
@@ -200,7 +259,12 @@ async def case_llm_unavailable_falls_back_unranked(assembly_id: str) -> CaseResu
     is testing. NCBI itself is still hit live."""
     slug = "llm-unavailable-fallback"
     title = "LLM unavailable (forced) -> deterministic fallback still returns a valid, unranked table (LIVE NCBI)"
-    detail: list[str] = []
+    detail: list[str] = [
+        "NOTE: this case intentionally forces get_llm_client() to raise — the "
+        "'LLM client unavailable: Simulated: NVIDIA_API_KEY unavailable' warning "
+        "you may see logged for this case is expected and is what's being tested here, "
+        "not a real failure.",
+    ]
 
     try:
         with patch(f"{_RESOLVER_MOD}.get_llm_client") as mock_llm:
@@ -240,10 +304,12 @@ async def case_empty_description_never_invented(assembly_id: str) -> CaseResult:
     detail: list[str] = []
 
     try:
-        result = await get_gene_annotation(
-            assembly_id,
-            user_question="Show me gene annotations for this species",
-        )
+        with _capture_llm_logs() as collector:
+            result = await get_gene_annotation(
+                assembly_id,
+                user_question="Show me gene annotations for this species",
+            )
+        detail.append(f"LLM path actually taken: {_summarize_llm_usage(collector)}")
         gene_table = result["gene_table"]
 
         # Independently re-fetch the same genes' raw NCBI records ourselves,
@@ -312,6 +378,14 @@ async def run_all(species_name: str) -> int:
     total = len(results)
 
     print("\n" + "#" * _WIDTH)
+    if os.getenv("NVIDIA_API_KEY"):
+        print("# LLM usage by case (cases 1/2/4 are supposed to hit the real LLM;")
+        print("# case 3 intentionally forces it off — see that case's own note):")
+        for r in results:
+            for line in r.detail_lines:
+                if line.startswith("LLM path actually taken:"):
+                    print(f"#   [{r.slug}] {line}")
+        print("#" * _WIDTH)
     print(f"# {passed}/{total} case(s) passed.")
     if passed < total:
         print("# FAILING CASES:")

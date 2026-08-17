@@ -45,6 +45,7 @@ or, from inside the container:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -52,7 +53,58 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from unittest.mock import patch
 
+# Root stays at WARNING so third-party libraries don't spam the console.
+# _capture_llm_logs() below captures the resolver/llm modules' own INFO-level
+# messages separately, so real fallback reasons are visible per case instead
+# of being silently absorbed.
 logging.getLogger().setLevel(logging.WARNING)
+
+_RESOLVER_LOGGER_NAME = "genome_agent.workflows.visualization_resolver"
+_LLM_LOGGER_NAME = "genome_agent.workflows.llm"
+
+
+class _RecordCollector(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@contextlib.contextmanager
+def _capture_llm_logs():
+    collector = _RecordCollector()
+    collector.setLevel(logging.INFO)
+    loggers = [logging.getLogger(_RESOLVER_LOGGER_NAME), logging.getLogger(_LLM_LOGGER_NAME)]
+    saved = [(lg, lg.level) for lg in loggers]
+    for lg in loggers:
+        lg.addHandler(collector)
+        lg.setLevel(logging.INFO)
+    try:
+        yield collector
+    finally:
+        for lg, level in saved:
+            lg.removeHandler(collector)
+            lg.setLevel(level)
+
+
+def _summarize_highlight_decision(collector: "_RecordCollector") -> str:
+    """Report exactly what happened to the highlight_gene decision: did the
+    LLM call fail outright, did it succeed but get dropped for not matching
+    a candidate name, or did the deterministic fallback end up supplying
+    the answer?"""
+    notes = []
+    for record in collector.records:
+        message = record.getMessage()
+        if "LLM client unavailable" in message:
+            notes.append(f"client unavailable ({message.split(': ', 1)[-1]})")
+        elif "resolver unavailable" in message:
+            notes.append(f"invoke failed ({message.split('(', 1)[-1].rsplit(')', 1)[0]})")
+        elif "not in candidate list" in message:
+            notes.append(f"LLM proposed a name that got dropped: {message}")
+    return "; ".join(notes) if notes else "no fallback/drop logged — LLM's own pick was used as-is"
+
 
 _WIDTH = 72
 
@@ -224,11 +276,12 @@ async def case_chromosome_map_highlight_from_question() -> CaseResult:
     question = "Show me the chromosome map with Trp53 highlighted"
 
     try:
-        result = await generate_visualization(
-            scope="chromosome_map",
-            gene_table=gene_table,
-            user_question=question,
-        )
+        with _capture_llm_logs() as collector:
+            result = await generate_visualization(
+                scope="chromosome_map",
+                gene_table=gene_table,
+                user_question=question,
+            )
 
         rendered = result["status"] == "COMPLETED" and result.get("chart_data") is not None
         highlight_color_present = b"e8622c" in (result.get("chart_data") or b"")
@@ -236,6 +289,7 @@ async def case_chromosome_map_highlight_from_question() -> CaseResult:
         detail.append(f"candidate genes: {[g['gene_name'] for g in gene_table]}")
         detail.append(f"chart rendered: {rendered}")
         detail.append(f"Trp53 highlighted in rendered SVG (real resolver found it): {highlight_color_present}")
+        detail.append(f"highlight decision detail: {_summarize_highlight_decision(collector)}")
 
         passed = rendered and highlight_color_present
         return CaseResult(slug, title, passed, detail)
