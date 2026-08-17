@@ -12,6 +12,8 @@ response in the same execution (the "grounding rule"). This module:
 2. Batches fetches gene summaries from NCBI
 3. Verifies grounding: every gene name/location/function came from NCBI
 4. Rejects any fact that LLM may have hallucinated
+5. Ranks genes with real, informative descriptions ahead of
+   "uncharacterized"/no-description ones (never drops the latter)
 
 Output shape matches schemas.outputs.GeneAnnotationOutput exactly
 (gene_table, gene_list).
@@ -120,6 +122,58 @@ async def fetch_gene_summaries(gene_ids: list[str]) -> tuple[list[dict], dict]:
         )
     
     return gene_table, grounding_record
+
+
+def _is_informative_description(gene_name: str, function: str) -> bool:
+    """
+    True if a gene's description is real/informative rather than a stand-in
+    for "we don't know anything about this gene yet".
+
+    NCBI marks unstudied genes in a couple of recognizable ways: an empty
+    description field, or a description/name that is just "uncharacterized
+    LOC######" (no real biology asserted). Anything else counts as
+    informative, even if terse.
+    """
+    if not function:
+        return False
+    lowered = function.strip().lower()
+    if lowered.startswith("uncharacterized"):
+        return False
+    if gene_name.upper().startswith("LOC") and lowered.startswith(gene_name.lower()):
+        # Some records echo the placeholder LOC id back as the "description".
+        return False
+    return True
+
+
+def _rank_gene_table(
+    gene_table: list[dict],
+    ranking_criteria: str | None = None,
+) -> list[dict]:
+    """
+    Rank genes with real, informative descriptions ahead of ones marked
+    "uncharacterized" or with no description — without dropping the
+    uncharacterized ones, per §3.3/§3.4/§3.8 of the design spec.
+
+    This is a stable sort: genes keep their relative NCBI order within
+    each bucket (informative vs. uncharacterized), so the LLM's or
+    fallback's original search ordering is preserved as a tiebreaker.
+    `ranking_criteria` is currently informational only (logged, not used
+    to further reorder) — the one hard ranking rule the spec requires is
+    "real description beats no description", which is deterministic and
+    doesn't need an LLM call per gene.
+    """
+    if ranking_criteria:
+        logger.info("[gene_annotation] ranking_criteria: %r", ranking_criteria)
+
+    informative = [
+        row for row in gene_table
+        if _is_informative_description(row.get("gene_name", ""), row.get("function", ""))
+    ]
+    uncharacterized = [
+        row for row in gene_table
+        if not _is_informative_description(row.get("gene_name", ""), row.get("function", ""))
+    ]
+    return informative + uncharacterized
 
 
 def _verify_grounding(
@@ -246,7 +300,11 @@ async def get_gene_annotation(
             "gene_list": [],
         }
     
-    # Step 5: Build gene_list (must be exactly named for cross-agent contract)
+    # Step 5: Rank real-description genes ahead of uncharacterized ones
+    # (never drops rows, only reorders — see §3.3/§3.4/§3.8).
+    gene_table = _rank_gene_table(gene_table, strategy.ranking_criteria)
+
+    # Step 6: Build gene_list (must be exactly named for cross-agent contract)
     gene_list = [row["gene_name"] for row in gene_table]
     
     return {

@@ -20,6 +20,8 @@ import asyncio
 import logging
 
 from ..workflows.visualization_resolver import (
+    resolve_chromosome_highlight,
+    resolve_chromosome_highlight_fallback,
     resolve_visualization_references,
     resolve_visualization_references_fallback,
 )
@@ -164,20 +166,25 @@ async def generate_visualization(
                 "note": "No gene data available to render a chromosome map.",
             }
         
-        # Try to extract a gene name from the question to highlight
-        highlight_gene = None
-        if user_question:
-            # Simple heuristic: look for capitalized words that might be gene names
-            # In a real system, the LLM could extract this more intelligently
-            words = user_question.split()
-            for word in words:
-                if len(word) <= 10 and word[0].isupper():
-                    # Check if this gene name exists in our data
-                    gene_names = [g.get("gene_name", "") for g in gene_table]
-                    if word in gene_names:
-                        highlight_gene = word
-                        break
-        
+        # Ask the LLM which gene (if any) the question implies should be
+        # highlighted; fall back to a deterministic heuristic if the LLM
+        # is unavailable. Either way, the result is constrained to gene
+        # names that actually exist in gene_table — never invented.
+        gene_names = [g.get("gene_name", "") for g in gene_table if g.get("gene_name")]
+
+        highlight_result = resolve_chromosome_highlight(user_question or "", gene_names)
+        if highlight_result is None:
+            highlight_result = resolve_chromosome_highlight_fallback(
+                user_question or "", gene_names
+            )
+
+        highlight_gene = highlight_result.highlight_gene
+        logger.info(
+            "[visualization] chromosome_map highlight: gene=%r, reasoning=%r",
+            highlight_gene,
+            highlight_result.reasoning,
+        )
+
         chart_data = render_chromosome_map(gene_table, highlight_gene=highlight_gene)
         
         return {
