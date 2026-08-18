@@ -21,6 +21,7 @@ was adapted to work without them.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -187,6 +188,13 @@ _SPECIES_RESOLVER_SYSTEM_PROMPT = (
     "honest reasoning note.\n"
     "7. NEVER fabricate an assembly_id. Only submit an assembly_id that literally "
     "appears in a search_assembly_by_taxid result.\n"
+    "8. ALWAYS fill in reasoning with a one-sentence explanation of your choice, "
+    "even when confidence is 1.0 and the match is unambiguous (e.g. 'search_taxonomy "
+    "returned a single exact match and search_assembly_by_taxid returned its "
+    "RefSeq assembly'). Never leave reasoning empty.\n"
+    "9. If a tool call you already made returns the same result again, do not "
+    "repeat it verbatim — either try a genuinely different query, move to the "
+    "next tool, or submit assembly_id=null with an honest reasoning note.\n"
 )
 
 
@@ -200,6 +208,39 @@ async def search_taxonomy(query: str) -> list[dict]:
 async def search_assembly_by_taxid(tax_id: str) -> list[dict]:
     """Search NCBI assembly for a given taxonomy ID."""
     return await _search_assembly_by_taxid_core(tax_id)
+
+
+def _check_duplicate_tool_call(
+    messages: list,
+    call_name: str,
+    call_args: dict,
+) -> tuple[bool, str | None]:
+    """Check if this tool call duplicates a previous one in the message history.
+
+    Same guard pattern as genome_metadata.py's resolver. Without this, a model
+    that gets an empty result from search_taxonomy has nothing stopping it from
+    calling search_taxonomy with the *same* query again on the next step —
+    which is exactly the "asain elefant" x4 loop seen in the wild. On a repeat,
+    we hand back the cached result instead of re-invoking the tool, and nudge
+    the model to change its approach.
+
+    Returns (is_duplicate, cached_result_or_None).
+    """
+    seen_calls: dict[tuple[str, str], str] = {}
+    for msg in messages:
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            for prev_call in msg.tool_calls:
+                prev_key = (prev_call["name"], json.dumps(prev_call["args"], sort_keys=True))
+                for later_msg in messages:
+                    if hasattr(later_msg, "tool_call_id") and later_msg.tool_call_id == prev_call["id"]:
+                        seen_calls[prev_key] = str(later_msg.content)
+                        break
+
+    call_key = (call_name, json.dumps(call_args, sort_keys=True))
+    if call_name in ("search_taxonomy", "search_assembly_by_taxid"):
+        if call_key in seen_calls:
+            return True, seen_calls[call_key]
+    return False, None
 
 
 async def resolve_species_llm(species_name: str) -> dict | None:
@@ -226,12 +267,24 @@ async def resolve_species_llm(species_name: str) -> dict | None:
 
     seen_tool_results: list[dict] = []
 
-    for step in range(4):
+    # 6 steps, not 4: disambiguation cases (e.g. "elephant" -> multiple taxonomy
+    # candidates) genuinely need more round trips than a clean single match —
+    # search_taxonomy, then search_assembly_by_taxid possibly more than once,
+    # then a final submission. 4 was tight enough that ambiguous cases could
+    # exhaust the budget with no exception and no explanation (see the trailing
+    # logger.info below, which used to be a silent `return None`).
+    max_steps = 6
+    for step in range(max_steps):
         try:
             response = await asyncio.to_thread(
                 invoke_with_retry,
                 lambda: bound.invoke(messages),
-                max_retries=1,
+                # This only matters for a genuine 503 capacity dip — a 429
+                # (rate limit) now fails on the first attempt regardless of
+                # this number and falls straight to the deterministic
+                # fallback below (see workflows/llm.py's
+                # _is_rate_limited_error / _is_capacity_error split).
+                max_retries=4,
             )
         except Exception as exc:
             logger.info("LLM species resolver failed: %s", summarize_llm_error(exc))
@@ -247,6 +300,28 @@ async def resolve_species_llm(species_name: str) -> dict | None:
             call_id = call["id"]
             call_name = call["name"]
             call_args = call["args"]
+
+            is_dup, cached = _check_duplicate_tool_call(messages, call_name, call_args)
+            if is_dup:
+                logger.info(
+                    "[guard] repeat call to %s(%s) intercepted — returning cached result",
+                    call_name,
+                    call_args,
+                )
+                messages.append(
+                    ToolMessage(
+                        content=(
+                            f"You already called {call_name}({call_args}) — here is that "
+                            f"same result again: {cached}. Calling it again with identical "
+                            "arguments will not produce a different result. Either change "
+                            "your query meaningfully, move on to the next tool, or submit "
+                            "SpeciesResolverOutput with assembly_id=null and confidence=0.0 "
+                            "if nothing further can be found."
+                        ),
+                        tool_call_id=call_id,
+                    )
+                )
+                continue
 
             if call_name == "search_taxonomy":
                 try:
@@ -296,8 +371,26 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                         )
                         continue
 
+                if not parsed.reasoning or not parsed.reasoning.strip():
+                    messages.append(
+                        ToolMessage(
+                            content=(
+                                "Error: reasoning must not be empty. Give a one-sentence "
+                                "explanation of why this assembly_id (or null) and this "
+                                "confidence are correct, then resubmit SpeciesResolverOutput."
+                            ),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
+
                 return parsed.model_dump()
 
+    logger.info(
+        "LLM species resolver exhausted %d steps for %r without a grounded submission",
+        max_steps,
+        species_name,
+    )
     return None
 
 

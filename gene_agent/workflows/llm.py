@@ -51,21 +51,20 @@ _T = TypeVar("_T")
 #
 # The graph itself never calls the LLM concurrently (query_router,
 # capability_resolver, and explanation_writer run one after another within
-# a single graph run), so the "Worker local total request limit reached"
-# errors come from this process's calls landing too close together in time
-# — either back-to-back scenarios in one run, or another process sharing the
-# same NVIDIA_API_KEY. Rather than let calls fire immediately and retry
-# after they get rejected, every call is paced through a single global gate:
-# at most one in-flight request at a time, with a minimum gap enforced
-# between the start of one call and the next. This keeps this agent's own
-# request pattern smooth and under the cap by construction, so the
-# exponential-backoff retry below becomes a rarely-needed safety net rather
-# than the primary defense.
+# a single graph run), so this gap is mainly a courtesy against this
+# process's own calls landing right on top of each other. It is NOT the
+# primary defense against 429s anymore — see _is_rate_limited_error /
+# _is_transient_error below: a 429 now fails straight to the deterministic
+# fallback instead of retrying, which does more to avoid compounding a
+# rate-limit than any amount of pacing can (pacing can't do anything about
+# load from other processes sharing this key anyway). A short, cheap gap
+# here still avoids *this process* being the one that tips a nearly-full
+# bucket over.
 # ---------------------------------------------------------------------------
 _LLM_GATE = threading.Semaphore(1)
 _pace_lock = threading.Lock()
 _last_call_started_at = 0.0
-MIN_CALL_INTERVAL_SECONDS = float(os.getenv("NVIDIA_LLM_MIN_INTERVAL", "0.5"))
+MIN_CALL_INTERVAL_SECONDS = float(os.getenv("NVIDIA_LLM_MIN_INTERVAL", "1.0"))
 
 
 def _pace() -> None:
@@ -128,56 +127,74 @@ def summarize_llm_error(exc: Exception) -> str:
     response dict repeated. Logging `str(exc)` as-is prints that whole
     two-line blob on every failure. This pulls out just the useful part.
     """
-    if _is_transient_error(exc):
-        return "NVIDIA endpoint rate-limited (free-tier cap reached) — using fallback"
+    if _is_rate_limited_error(exc):
+        return "NVIDIA endpoint rate-limited (429, over the free-tier RPM cap) — using fallback"
+    if _is_capacity_error(exc):
+        return "NVIDIA endpoint worker pool saturated (503, transient) — using fallback"
     # Fall back to the first line only, so unexpected errors still surface
     # without dragging the raw response dict into the log.
     return str(exc).splitlines()[0]
 
 
-def _is_transient_error(exc: Exception) -> bool:
-    """True for rate-limit / service-unavailable errors worth retrying.
+def _is_capacity_error(exc: Exception) -> bool:
+    """True for 503 / ResourceExhausted worker-pool saturation.
 
-    Anything else (auth errors, bad requests, malformed tool calls, etc.)
-    is left alone so it re-raises immediately and the existing fallback
-    logic in query_router / capability_resolver / explanation_writer
-    kicks in exactly as before.
+    This is a "busy right now" signal, not a rate-limit signal — the local
+    NIM worker pool is momentarily full, and it commonly clears within a
+    couple seconds. Worth a short retry. Matches trait_discovery_agent's
+    workflows/llm/client.py::_is_capacity_error.
     """
     message = str(exc).lower()
-    return any(
-        marker in message
-        for marker in (
-            "resourceexhausted",
-            "rate limit",
-            "rate_limit",
-            "too many requests",
-            "503",
-            "429",
-            "service unavailable",
-        )
+    return "503" in message or "resourceexhausted" in message or (
+        "request limit" in message and "service unavailable" in message
     )
+
+
+def _is_rate_limited_error(exc: Exception) -> bool:
+    """True for 429 — you are over your requests-per-minute cap.
+
+    Deliberately NOT retried (see _is_transient_error below): retrying a
+    429 immediately just adds another request to a bucket that's already
+    over its limit, which can't help and often makes the next request also
+    429. The right response to a 429 is to fail straight to the
+    deterministic fallback, not to retry — same split trait_discovery_agent
+    makes by excluding 429 from its _is_capacity_error.
+    """
+    message = str(exc).lower()
+    return "429" in message or "too many requests" in message or "rate limit" in message or "rate_limit" in message
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """True only for errors worth retrying — i.e. capacity (503), not rate
+    limit (429). Anything else (auth errors, bad requests, malformed tool
+    calls, 429s) is left alone so it re-raises immediately and the existing
+    fallback logic in query_router / capability_resolver / explanation_writer
+    kicks in right away.
+    """
+    return _is_capacity_error(exc)
 
 
 def invoke_with_retry(
     invoke_fn: Callable[[], _T],
     *,
     max_retries: int = 1,
-    base_delay: float = 1.0,
+    base_delay: float = 2.5,
 ) -> _T:
     """Call `invoke_fn()` through the pacing gate above.
 
-    On a free-tier key, the shared "Worker local total request limit
-    reached" ceiling is outside this process's control — no amount of
-    local pacing or backoff avoids it when the endpoint is genuinely
-    saturated. Every caller of this function (query_router,
-    capability_resolver, explanation_writer) already has a fast,
-    deterministic non-LLM fallback for exactly this case, so the default
-    here is now a single attempt: on a transient error, raise immediately
-    and let that fallback answer right away instead of burning several
-    seconds retrying a call that's likely to fail again.
+    Only retries on a capacity (503) error — see _is_transient_error /
+    _is_capacity_error. A 429 (rate limit) is deliberately NOT retried here:
+    it raises immediately on the first attempt regardless of max_retries,
+    matching trait_discovery_agent's client.py. Every caller of this
+    function (query_router, capability_resolver, explanation_writer, and
+    the species_resolver / genome_metadata subagents) already has a fast,
+    deterministic non-LLM fallback for exactly this case, so failing fast
+    on a 429 gets to that fallback right away instead of burning several
+    seconds retrying a request that's likely to 429 again.
 
-    Pass max_retries > 1 explicitly if you'd rather wait out a transient
-    dip than fall back (e.g. for a call with no good fallback path).
+    Pass max_retries > 1 to ride out a genuinely transient 503 capacity dip
+    (worth doing — those often clear within a couple seconds). It has no
+    effect on 429 handling.
     """
     last_exc: Exception | None = None
     for attempt in range(max_retries):
@@ -189,7 +206,7 @@ def invoke_with_retry(
                 last_exc = exc
                 if not _is_transient_error(exc) or attempt == max_retries - 1:
                     raise
-                delay = base_delay * (2**attempt) + random.uniform(0, 0.5)
+                delay = base_delay * (2**attempt) + random.uniform(0, 1.0)
                 logger.warning(
                     "Transient NVIDIA endpoint error (attempt %d/%d), retrying in %.1fs: %s",
                     attempt + 1,

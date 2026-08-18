@@ -147,6 +147,11 @@ _GENOME_METADATA_SYSTEM_PROMPT = (
     "5. If only one assembly exists or the given one is already the best, "
     "submit it directly with assembly_id_used equal to the input.\n"
     "6. Never estimate missing stats - report them as null.\n"
+    "7. ALWAYS fill in reasoning with a one-sentence explanation, even when no "
+    "substitution was made (e.g. 'only one assembly exists for this taxon, "
+    "already RefSeq'). Never leave reasoning empty.\n"
+    "8. NEVER submit an assembly_id_used that didn't literally appear in a "
+    "fetch_assembly_stats or list_alternate_assemblies result.\n"
 )
 
 
@@ -368,20 +373,23 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
         ),
     ]
 
-    # Grounding record: every assembly_id that a real tool call actually
-    # returned in this run. Populated as fetch_assembly_stats and
-    # list_alternate_assemblies results come back below. The final
-    # GenomeMetadataOutput.assembly_id_used is checked against this set
-    # before being accepted — mirrors the same rule already enforced in
-    # species_resolver.resolve_species_llm for assembly_id.
-    seen_assembly_ids: set[str] = set()
+    # Assembly ids actually returned by fetch_assembly_stats / list_alternate_assemblies,
+    # so a final assembly_id_used can be checked for grounding the same way
+    # species_resolver.py grounds assembly_id — nothing previously stopped the
+    # model from substituting an assembly_id_used it never actually looked up.
+    seen_assembly_ids: set[str] = {assembly_id}
 
-    for step in range(5):
+    max_steps = 5
+    for step in range(max_steps):
         try:
             response = await asyncio.to_thread(
                 invoke_with_retry,
                 lambda: bound.invoke(messages),
-                max_retries=1,
+                # This only matters for a genuine 503 capacity dip — a 429
+                # now fails on the first attempt and falls straight to the
+                # deterministic fallback (see workflows/llm.py's
+                # _is_rate_limited_error / _is_capacity_error split).
+                max_retries=4,
             )
         except Exception as exc:
             logger.info("LLM genome metadata failed: %s", summarize_llm_error(exc))
@@ -442,9 +450,11 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                     result = f"Error: {exc}"
                 messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
                 if isinstance(result, list):
-                    for item in result:
-                        if isinstance(item, dict) and item.get("assembly_id"):
-                            seen_assembly_ids.add(item["assembly_id"])
+                    seen_assembly_ids.update(
+                        item["assembly_id"]
+                        for item in result
+                        if isinstance(item, dict) and item.get("assembly_id")
+                    )
 
             elif call_name == "GenomeMetadataOutput":
                 try:
@@ -466,9 +476,22 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                         ToolMessage(
                             content=(
                                 f"Error: assembly_id_used '{parsed.assembly_id_used}' was never "
-                                "returned by fetch_assembly_stats or list_alternate_assemblies in "
-                                "this conversation. Only submit an assembly_id_used that literally "
-                                "appears in one of those tool results."
+                                "returned by fetch_assembly_stats or list_alternate_assemblies. "
+                                "Only submit an assembly_id_used that literally appeared in a "
+                                "tool result."
+                            ),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
+
+                if not parsed.reasoning or not parsed.reasoning.strip():
+                    messages.append(
+                        ToolMessage(
+                            content=(
+                                "Error: reasoning must not be empty. Give a one-sentence "
+                                "explanation (e.g. why no substitution was needed, or why "
+                                "you substituted), then resubmit GenomeMetadataOutput."
                             ),
                             tool_call_id=call_id,
                         )
@@ -477,6 +500,11 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
 
                 return parsed.model_dump()
 
+    logger.info(
+        "LLM genome metadata exhausted %d steps for assembly %r without a grounded submission",
+        max_steps,
+        assembly_id,
+    )
     return None
 
 
