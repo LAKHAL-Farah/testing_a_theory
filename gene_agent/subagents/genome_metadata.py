@@ -30,7 +30,7 @@ from langchain_core.tools import tool
 
 from ._ncbi_client import ncbi_get
 from ..schemas.outputs import GenomeMetadataOutput
-from ..workflows.llm import get_llm_client, invoke_with_retry, summarize_llm_error
+from ..workflows.llm import coerce_null_sentinels, get_llm_client, invoke_with_retry, summarize_llm_error
 
 logger = logging.getLogger(__name__)
 
@@ -378,17 +378,27 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
     # species_resolver.py grounds assembly_id — nothing previously stopped the
     # model from substituting an assembly_id_used it never actually looked up.
     seen_assembly_ids: set[str] = {assembly_id}
+    # Human-readable trace of what happened at each step, logged on
+    # exhaustion — see the matching mechanism in species_resolver.py's
+    # resolve_species_llm for the rationale.
+    step_trace: list[str] = []
 
-    max_steps = 5
+    # 7 steps, not 5: same compromise as species_resolver.py's max_steps
+    # bump — MODEL_NAME now defaults to the smaller/less-contended
+    # meta/llama-3.1-8b-instruct, which is more prone to needing an extra
+    # retry round (rejected substitution, redundant tool call) before it
+    # converges on a grounded answer.
+    max_steps = 7
     for step in range(max_steps):
         try:
             response = await asyncio.to_thread(
                 invoke_with_retry,
                 lambda: bound.invoke(messages),
-                # This only matters for a genuine 503 capacity dip — a 429
-                # now fails on the first attempt and falls straight to the
-                # deterministic fallback (see workflows/llm.py's
-                # _is_rate_limited_error / _is_capacity_error split).
+                # Covers both a transient 503 capacity dip (exponential
+                # backoff, up to this many attempts) and a 429 rate limit
+                # (a single delayed retry, capped regardless of this
+                # number) — see workflows/llm.py's invoke_with_retry /
+                # _is_rate_limited_error / _is_capacity_error split.
                 max_retries=4,
             )
         except Exception as exc:
@@ -402,6 +412,7 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
 
         tool_calls = response.tool_calls or []
         if not tool_calls:
+            step_trace.append(f"step {step + 1}: model returned no tool calls (content: {str(response.content)[:120]!r})")
             continue
 
         messages.append(AIMessage(content="", tool_calls=tool_calls))
@@ -424,6 +435,7 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
 
             is_dup, cached = _check_duplicate_tool_call(messages, call_name, call_args)
             if is_dup:
+                step_trace.append(f"step {step + 1}: repeat call to {call_name}({call_args}) intercepted")
                 logger.info(f"[guard] CACHE HIT — returning cached result instead of invoking {call_name}")
                 messages.append(
                     ToolMessage(
@@ -447,6 +459,7 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                 messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
                 if isinstance(result, dict) and result.get("assembly_id"):
                     seen_assembly_ids.add(result["assembly_id"])
+                step_trace.append(f"step {step + 1}: fetch_assembly_stats({call_args}) -> {str(result)[:120]!r}")
 
             elif call_name == "list_alternate_assemblies":
                 try:
@@ -460,11 +473,21 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                         for item in result
                         if isinstance(item, dict) and item.get("assembly_id")
                     )
+                    step_trace.append(
+                        f"step {step + 1}: list_alternate_assemblies({call_args}) -> {len(result)} result(s)"
+                    )
+                else:
+                    step_trace.append(
+                        f"step {step + 1}: list_alternate_assemblies({call_args}) -> {str(result)[:120]!r}"
+                    )
 
             elif call_name == "GenomeMetadataOutput":
                 try:
-                    parsed = GenomeMetadataOutput(**call_args)
+                    parsed = GenomeMetadataOutput(
+                        **coerce_null_sentinels(call_args, {"karyotype", "assembly_level"})
+                    )
                 except Exception as exc:
+                    step_trace.append(f"step {step + 1}: GenomeMetadataOutput rejected — parse error: {exc}")
                     messages.append(
                         ToolMessage(
                             content=f"Error parsing output: {exc}",
@@ -477,6 +500,10 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                     parsed.genome_size_bp = None
 
                 if parsed.assembly_id_used not in seen_assembly_ids:
+                    step_trace.append(
+                        f"step {step + 1}: GenomeMetadataOutput rejected — assembly_id_used "
+                        f"{parsed.assembly_id_used!r} not grounded in any tool result"
+                    )
                     messages.append(
                         ToolMessage(
                             content=(
@@ -491,6 +518,7 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                     continue
 
                 if not parsed.reasoning or not parsed.reasoning.strip():
+                    step_trace.append(f"step {step + 1}: GenomeMetadataOutput rejected — empty reasoning")
                     messages.append(
                         ToolMessage(
                             content=(
@@ -505,10 +533,20 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
 
                 return parsed.model_dump()
 
-    logger.info(
-        "LLM genome metadata exhausted %d steps for assembly %r without a grounded submission",
+            else:
+                step_trace.append(f"step {step + 1}: unrecognized tool call {call_name}({call_args})")
+
+    # WARNING, not INFO — same rationale as species_resolver.py's matching
+    # fix: loop exhaustion without a grounded submission is a silent-None
+    # cause just like an exception is, and INFO never reached stderr under
+    # this script's WARNING-only root logger. Includes step_trace for the
+    # same reason species_resolver.py's does — "kept rejecting on ungrounded
+    # ids" and "never called GenomeMetadataOutput" need different fixes.
+    logger.warning(
+        "LLM genome metadata exhausted %d steps for assembly %r without a grounded submission. Trace:\n%s",
         max_steps,
         assembly_id,
+        "\n".join(f"  {line}" for line in step_trace) or "  (no tool calls made at all)",
     )
     return None
 

@@ -48,9 +48,51 @@ warnings.filterwarnings(
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "meta/llama-3.3-70b-instruct"
+# meta/llama-3.3-70b-instruct is one of the most heavily-used models in
+# NVIDIA's free NIM catalog — "Worker local total request limit reached
+# (24/16)" is that specific model's shared worker pool being oversubscribed
+# by *everyone* on the free tier hitting it at once, not a limit tied to
+# this app or this key. Local pacing/backoff can't fix a pool that's
+# already 8 requests over capacity before we even get in line — the actual
+# lever is using a smaller, less contended model. meta/llama-3.1-8b-instruct
+# still supports tool calling (bind_tools) and gets noticeably less
+# free-tier traffic, at the cost of somewhat weaker reasoning on the
+# harder disambiguation cases — that's the "slight compromise" for
+# actually getting live LLM responses instead of skipping. Override with
+# NVIDIA_LLM_MODEL if you want the 70b back (e.g. once congestion clears,
+# or if you have a paid/higher-tier key).
+MODEL_NAME = os.getenv("NVIDIA_LLM_MODEL", "meta/llama-3.1-8b-instruct")
 
 _T = TypeVar("_T")
+
+# Smaller tool-calling models frequently emit the JSON *keyword* null as a
+# quoted *string* instead — e.g. {"assembly_id": "null"} instead of
+# {"assembly_id": null}. Pydantic happily accepts that as the literal
+# three-character string for any `str | None` field, so a caller checking
+# `value is not None` never sees it as absent. This showed up concretely in
+# species_resolver.py: the free-tier 8B model, on the "elephant" scenario,
+# decided to give up (assembly_id=null) but encoded it this way, and burned
+# its whole step budget hitting the grounding-rejection message over and
+# over instead of ever reaching a valid submission.
+_NULL_SENTINELS = {"null", "none", "nil", "n/a", "na", ""}
+
+
+def coerce_null_sentinels(args: dict, nullable_fields: set[str]) -> dict:
+    """Return a copy of `args` with any of `nullable_fields` whose value is
+    a null-sentinel string (see _NULL_SENTINELS) replaced with real None.
+
+    Only touches keys present in `args` and listed in `nullable_fields` —
+    fields that are genuinely required (e.g. GenomeMetadataOutput's
+    assembly_id_used) are deliberately left alone so a "null" there still
+    fails pydantic validation and prompts a real resubmission, rather than
+    silently becoming an invalid None for a required field.
+    """
+    cleaned = dict(args)
+    for field in nullable_fields:
+        value = cleaned.get(field)
+        if isinstance(value, str) and value.strip().lower() in _NULL_SENTINELS:
+            cleaned[field] = None
+    return cleaned
 
 # ---------------------------------------------------------------------------
 # Proactive pacing / concurrency limiting.
@@ -85,7 +127,14 @@ _T = TypeVar("_T")
 _LLM_GATE = threading.Semaphore(1)
 _pace_lock = threading.Lock()
 _last_call_started_at = 0.0
-MIN_CALL_INTERVAL_SECONDS = float(os.getenv("NVIDIA_LLM_MIN_INTERVAL", "1.5"))
+# Bumped from 1.5s -> 2.5s: the tool loops in species_resolver.py (up to 6
+# steps) and genome_metadata.py (up to 5 steps) each make that many
+# sequential NVIDIA calls per scenario. A tighter gap made it more likely
+# for a run to still be inside the free tier's worker-pool window when the
+# next step's call started, which is what actually trips "Worker local
+# total request limit reached" — this is a deliberate speed-for-reliability
+# trade (slower demo runs, fewer skipped LLM steps), not a bugfix.
+MIN_CALL_INTERVAL_SECONDS = float(os.getenv("NVIDIA_LLM_MIN_INTERVAL", "2.5"))
 
 # Shared across every process that checks out this repo (dev machine or any
 # docker-compose service), since they all mount the same gene_agent/ dir.
@@ -175,7 +224,14 @@ def get_llm_client() -> BaseChatModel:
         # minute before our fallback logic ever gets a chance to run.
         # Failing in a few seconds instead means the deterministic
         # fallback kicks in fast, which is the whole point of having one.
-        timeout=float(os.getenv("NVIDIA_LLM_TIMEOUT", "8")),
+        # Bumped from 8s -> 12s: on a congested free-tier worker pool, calls
+        # that *do* eventually succeed often take longer than 8s to get a
+        # slot, and the old timeout was cutting those off before they had a
+        # chance. The cross-process flock in _llm_call_slot already bounds
+        # how many calls can be waiting at once, so a slightly longer
+        # per-call timeout doesn't reintroduce the pile-up risk the shorter
+        # value was originally guarding against.
+        timeout=float(os.getenv("NVIDIA_LLM_TIMEOUT", "12")),
     )
 
 
@@ -216,25 +272,33 @@ def _is_capacity_error(exc: Exception) -> bool:
 def _is_rate_limited_error(exc: Exception) -> bool:
     """True for 429 — you are over your requests-per-minute cap.
 
-    Deliberately NOT retried (see _is_transient_error below): retrying a
-    429 immediately just adds another request to a bucket that's already
-    over its limit, which can't help and often makes the next request also
-    429. The right response to a 429 is to fail straight to the
-    deterministic fallback, not to retry — same split trait_discovery_agent
-    makes by excluding 429 from its _is_capacity_error.
+    Gets exactly one delayed retry (see RATE_LIMIT_RETRY_DELAY_SECONDS /
+    invoke_with_retry below), not the same immediate exponential schedule
+    as a 503: hammering a bucket that's already over its limit doesn't
+    help, but a free-tier key trips this often enough that always failing
+    straight to the deterministic fallback means the LLM path almost never
+    actually runs. One extra ~10s wait per call is the compromise — slower,
+    but it gets a live answer far more often.
     """
     message = str(exc).lower()
     return "429" in message or "too many requests" in message or "rate limit" in message or "rate_limit" in message
 
 
 def _is_transient_error(exc: Exception) -> bool:
-    """True only for errors worth retrying — i.e. capacity (503), not rate
-    limit (429). Anything else (auth errors, bad requests, malformed tool
-    calls, 429s) is left alone so it re-raises immediately and the existing
-    fallback logic in query_router / capability_resolver / explanation_writer
-    kicks in right away.
+    """True for any error worth retrying at all — capacity (503) or rate
+    limit (429), each on its own schedule (see invoke_with_retry). Anything
+    else (auth errors, bad requests, malformed tool calls) is left alone so
+    it re-raises immediately and the existing fallback logic in
+    query_router / capability_resolver / explanation_writer kicks in right
+    away.
     """
-    return _is_capacity_error(exc)
+    return _is_capacity_error(exc) or _is_rate_limited_error(exc)
+
+
+# One-time delay before the single 429 retry. NVIDIA's free-tier RPM window
+# is short enough that this is usually enough for the bucket to have room
+# again, without making a skipped-LLM-step demo run painfully slow.
+RATE_LIMIT_RETRY_DELAY_SECONDS = float(os.getenv("NVIDIA_LLM_RATE_LIMIT_RETRY_DELAY", "10"))
 
 
 def invoke_with_retry(
@@ -245,19 +309,21 @@ def invoke_with_retry(
 ) -> _T:
     """Call `invoke_fn()` through the pacing gate above.
 
-    Only retries on a capacity (503) error — see _is_transient_error /
-    _is_capacity_error. A 429 (rate limit) is deliberately NOT retried here:
-    it raises immediately on the first attempt regardless of max_retries,
-    matching trait_discovery_agent's client.py. Every caller of this
-    function (query_router, capability_resolver, explanation_writer, and
-    the species_resolver / genome_metadata subagents) already has a fast,
-    deterministic non-LLM fallback for exactly this case, so failing fast
-    on a 429 gets to that fallback right away instead of burning several
-    seconds retrying a request that's likely to 429 again.
+    Two different retry schedules, both counted against max_retries:
+      - Capacity (503): exponential backoff (base_delay * 2**attempt), on
+        the theory that a saturated worker pool clears within seconds.
+      - Rate limit (429): capped at exactly one retry, ever, after a fixed
+        RATE_LIMIT_RETRY_DELAY_SECONDS wait — a deliberate compromise for a
+        free tier that trips this often (see _is_rate_limited_error).
+        Retried at most once regardless of max_retries, since a second 429
+        in a row means the wait didn't help and further attempts are very
+        unlikely to either.
 
-    Pass max_retries > 1 to ride out a genuinely transient 503 capacity dip
-    (worth doing — those often clear within a couple seconds). It has no
-    effect on 429 handling.
+    Every caller of this function (query_router, capability_resolver,
+    explanation_writer, and the species_resolver / genome_metadata
+    subagents) already has a fast, deterministic non-LLM fallback, so once
+    both budgets are exhausted this raises and the caller falls back
+    immediately rather than retrying further.
 
     The whole attempt sequence (including backoff sleeps between retries)
     runs inside one _llm_call_slot() acquisition, so a retry here can't
@@ -265,13 +331,27 @@ def invoke_with_retry(
     concurrent-request-limit error it's trying to recover from.
     """
     last_exc: Exception | None = None
+    rate_limit_retry_used = False
     with _llm_call_slot():
         for attempt in range(max_retries):
             try:
                 return invoke_fn()
             except Exception as exc:
                 last_exc = exc
-                if not _is_transient_error(exc) or attempt == max_retries - 1:
+                is_last_attempt = attempt == max_retries - 1
+                if _is_rate_limited_error(exc):
+                    if rate_limit_retry_used or is_last_attempt:
+                        raise
+                    rate_limit_retry_used = True
+                    delay = RATE_LIMIT_RETRY_DELAY_SECONDS + random.uniform(0, 1.0)
+                    logger.warning(
+                        "NVIDIA endpoint rate-limited (429), retrying once in %.1fs: %s",
+                        delay,
+                        exc,
+                    )
+                    time.sleep(delay)
+                    continue
+                if not _is_capacity_error(exc) or is_last_attempt:
                     raise
                 delay = base_delay * (2**attempt) + random.uniform(0, 1.0)
                 logger.warning(

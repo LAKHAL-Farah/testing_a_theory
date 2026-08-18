@@ -29,7 +29,7 @@ from langchain_core.tools import tool
 
 from ._ncbi_client import ncbi_get
 from ..schemas.outputs import SpeciesResolverOutput
-from ..workflows.llm import get_llm_client, invoke_with_retry, summarize_llm_error
+from ..workflows.llm import coerce_null_sentinels, get_llm_client, invoke_with_retry, summarize_llm_error
 
 logger = logging.getLogger(__name__)
 
@@ -266,24 +266,32 @@ async def resolve_species_llm(species_name: str) -> dict | None:
     ]
 
     seen_tool_results: list[dict] = []
+    # Human-readable trace of what happened at each step, logged on
+    # exhaustion so a silent non-convergence (as opposed to an API error)
+    # is actually diagnosable instead of just "SKIP" — see the log call
+    # after the loop below.
+    step_trace: list[str] = []
 
-    # 6 steps, not 4: disambiguation cases (e.g. "elephant" -> multiple taxonomy
-    # candidates) genuinely need more round trips than a clean single match —
-    # search_taxonomy, then search_assembly_by_taxid possibly more than once,
-    # then a final submission. 4 was tight enough that ambiguous cases could
-    # exhaust the budget with no exception and no explanation (see the trailing
-    # logger.info below, which used to be a silent `return None`).
-    max_steps = 6
+    # 8 steps, not 6: bumped again after switching MODEL_NAME to the
+    # smaller/less-contended meta/llama-3.1-8b-instruct (see workflows/llm.py
+    # for why). A smaller model is more prone to needing an extra retry
+    # round on a rejected/ungrounded submission or a redundant tool call
+    # before it converges on the same disambiguation work the 70b model did
+    # in fewer steps — this is part of the same compromise (weaker
+    # reasoning, so give it more room to still land correctly rather than
+    # exhausting the budget on a case like "elephant" that needs several
+    # genuine round trips even for a strong model).
+    max_steps = 8
     for step in range(max_steps):
         try:
             response = await asyncio.to_thread(
                 invoke_with_retry,
                 lambda: bound.invoke(messages),
-                # This only matters for a genuine 503 capacity dip — a 429
-                # (rate limit) now fails on the first attempt regardless of
-                # this number and falls straight to the deterministic
-                # fallback below (see workflows/llm.py's
-                # _is_rate_limited_error / _is_capacity_error split).
+                # Covers both a transient 503 capacity dip (exponential
+                # backoff, up to this many attempts) and a 429 rate limit
+                # (a single delayed retry, capped regardless of this
+                # number) — see workflows/llm.py's invoke_with_retry /
+                # _is_rate_limited_error / _is_capacity_error split.
                 max_retries=4,
             )
         except Exception as exc:
@@ -301,6 +309,7 @@ async def resolve_species_llm(species_name: str) -> dict | None:
 
         tool_calls = response.tool_calls or []
         if not tool_calls:
+            step_trace.append(f"step {step + 1}: model returned no tool calls (content: {str(response.content)[:120]!r})")
             continue
 
         messages.append(AIMessage(content="", tool_calls=tool_calls))
@@ -312,6 +321,7 @@ async def resolve_species_llm(species_name: str) -> dict | None:
 
             is_dup, cached = _check_duplicate_tool_call(messages, call_name, call_args)
             if is_dup:
+                step_trace.append(f"step {step + 1}: repeat call to {call_name}({call_args}) intercepted")
                 logger.info(
                     "[guard] repeat call to %s(%s) intercepted — returning cached result",
                     call_name,
@@ -340,6 +350,9 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                 messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
                 if isinstance(result, list):
                     seen_tool_results.extend(result)
+                    step_trace.append(f"step {step + 1}: search_taxonomy({call_args}) -> {len(result)} result(s)")
+                else:
+                    step_trace.append(f"step {step + 1}: search_taxonomy({call_args}) -> {str(result)[:120]!r}")
 
             elif call_name == "search_assembly_by_taxid":
                 try:
@@ -349,11 +362,23 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                 messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
                 if isinstance(result, list):
                     seen_tool_results.extend(result)
+                    step_trace.append(
+                        f"step {step + 1}: search_assembly_by_taxid({call_args}) -> {len(result)} result(s)"
+                    )
+                else:
+                    step_trace.append(
+                        f"step {step + 1}: search_assembly_by_taxid({call_args}) -> {str(result)[:120]!r}"
+                    )
 
             elif call_name == "SpeciesResolverOutput":
                 try:
-                    parsed = SpeciesResolverOutput(**call_args)
+                    parsed = SpeciesResolverOutput(
+                        **coerce_null_sentinels(
+                            call_args, {"assembly_id", "scientific_name", "common_name"}
+                        )
+                    )
                 except Exception as exc:
+                    step_trace.append(f"step {step + 1}: SpeciesResolverOutput rejected — parse error: {exc}")
                     messages.append(
                         ToolMessage(
                             content=f"Error parsing output: {exc}",
@@ -368,6 +393,10 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                         for item in seen_tool_results
                     )
                     if not grounded:
+                        step_trace.append(
+                            f"step {step + 1}: SpeciesResolverOutput rejected — assembly_id "
+                            f"{parsed.assembly_id!r} not grounded in any tool result"
+                        )
                         messages.append(
                             ToolMessage(
                                 content=(
@@ -381,6 +410,7 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                         continue
 
                 if not parsed.reasoning or not parsed.reasoning.strip():
+                    step_trace.append(f"step {step + 1}: SpeciesResolverOutput rejected — empty reasoning")
                     messages.append(
                         ToolMessage(
                             content=(
@@ -395,10 +425,24 @@ async def resolve_species_llm(species_name: str) -> dict | None:
 
                 return parsed.model_dump()
 
-    logger.info(
-        "LLM species resolver exhausted %d steps for %r without a grounded submission",
+            else:
+                step_trace.append(f"step {step + 1}: unrecognized tool call {call_name}({call_args})")
+
+    # WARNING, not INFO — same rationale as the exception-path log above:
+    # this is the other silent-None cause (loop exhausted without ever
+    # producing a valid grounded submission, vs. an exception), and at
+    # INFO level under this script's WARNING-only root logger it never
+    # reached stderr, making a genuine non-convergence indistinguishable
+    # from any other silent skip. Includes the full step_trace so a
+    # non-convergence is actually diagnosable — e.g. "kept repeating the
+    # same search" vs "kept submitting ungrounded ids" vs "never called
+    # SpeciesResolverOutput at all" are very different problems that a
+    # bare "exhausted N steps" line can't distinguish between.
+    logger.warning(
+        "LLM species resolver exhausted %d steps for %r without a grounded submission. Trace:\n%s",
         max_steps,
         species_name,
+        "\n".join(f"  {line}" for line in step_trace) or "  (no tool calls made at all)",
     )
     return None
 
