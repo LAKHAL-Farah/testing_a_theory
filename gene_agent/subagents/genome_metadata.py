@@ -368,6 +368,14 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
         ),
     ]
 
+    # Grounding record: every assembly_id that a real tool call actually
+    # returned in this run. Populated as fetch_assembly_stats and
+    # list_alternate_assemblies results come back below. The final
+    # GenomeMetadataOutput.assembly_id_used is checked against this set
+    # before being accepted — mirrors the same rule already enforced in
+    # species_resolver.resolve_species_llm for assembly_id.
+    seen_assembly_ids: set[str] = set()
+
     for step in range(5):
         try:
             response = await asyncio.to_thread(
@@ -424,6 +432,8 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                 except Exception as exc:
                     result = f"Error: {exc}"
                 messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
+                if isinstance(result, dict) and result.get("assembly_id"):
+                    seen_assembly_ids.add(result["assembly_id"])
 
             elif call_name == "list_alternate_assemblies":
                 try:
@@ -431,6 +441,10 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                 except Exception as exc:
                     result = f"Error: {exc}"
                 messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
+                if isinstance(result, list):
+                    for item in result:
+                        if isinstance(item, dict) and item.get("assembly_id"):
+                            seen_assembly_ids.add(item["assembly_id"])
 
             elif call_name == "GenomeMetadataOutput":
                 try:
@@ -446,6 +460,20 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
 
                 if parsed.genome_size_bp is not None and parsed.genome_size_bp <= 0:
                     parsed.genome_size_bp = None
+
+                if parsed.assembly_id_used not in seen_assembly_ids:
+                    messages.append(
+                        ToolMessage(
+                            content=(
+                                f"Error: assembly_id_used '{parsed.assembly_id_used}' was never "
+                                "returned by fetch_assembly_stats or list_alternate_assemblies in "
+                                "this conversation. Only submit an assembly_id_used that literally "
+                                "appears in one of those tool results."
+                            ),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
 
                 return parsed.model_dump()
 
