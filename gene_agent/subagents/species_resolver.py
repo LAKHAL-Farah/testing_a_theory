@@ -287,7 +287,16 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                 max_retries=4,
             )
         except Exception as exc:
-            logger.info("LLM species resolver failed: %s", summarize_llm_error(exc))
+            # WARNING, not INFO: this is the one line that explains an
+            # otherwise-silent None return (a "SKIP" in the scenario
+            # runner, a quiet deterministic-fallback in production). Every
+            # caller of this module sets the root logger to WARNING to
+            # keep other subagents' chatter out of the trace (see
+            # scripts/run_species_resolver_scenarios.py) — at INFO level
+            # this line never reached stderr at all, so a genuine 429 and
+            # a merely-slow/misconfigured client were both indistinguishable
+            # from the outside.
+            logger.warning("LLM species resolver failed: %s", summarize_llm_error(exc))
             return None
 
         tool_calls = response.tool_calls or []

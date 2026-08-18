@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import random
@@ -9,6 +10,11 @@ import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, TypeVar
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Docker/Linux only in practice
+    fcntl = None
 
 from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
@@ -47,36 +53,93 @@ MODEL_NAME = "meta/llama-3.3-70b-instruct"
 _T = TypeVar("_T")
 
 # ---------------------------------------------------------------------------
-# Proactive pacing.
+# Proactive pacing / concurrency limiting.
 #
-# The graph itself never calls the LLM concurrently (query_router,
-# capability_resolver, and explanation_writer run one after another within
-# a single graph run), so this gap is mainly a courtesy against this
-# process's own calls landing right on top of each other. It is NOT the
-# primary defense against 429s anymore — see _is_rate_limited_error /
-# _is_transient_error below: a 429 now fails straight to the deterministic
-# fallback instead of retrying, which does more to avoid compounding a
-# rate-limit than any amount of pacing can (pacing can't do anything about
-# load from other processes sharing this key anyway). A short, cheap gap
-# here still avoids *this process* being the one that tips a nearly-full
-# bucket over.
+# docker-compose.yml runs full_species_resolver_demo and
+# full_genome_metadata_demo (plus genome-agent-scenarios, ncbi-live-check,
+# etc.) as *separate containers*, all with `env_file: .env`, so they all
+# share one free-tier NVIDIA_API_KEY. An in-memory threading.Semaphore only
+# serializes calls made by this one process — it does nothing to stop two+
+# containers from each calling NVIDIA at once.
+#
+# IMPORTANT: "Worker local total request limit reached (17/16)" is a
+# *concurrent in-flight requests* cap, not a requests-per-minute cap.
+# Spacing out when calls *start* (the original approach) doesn't fix this —
+# if a call takes longer to complete than the gap between two call starts
+# (very likely: NIM can take several seconds per turn, and the tool loop
+# makes several turns), multiple calls end up in flight at once regardless
+# of how evenly their starts were spaced. The only thing that actually
+# bounds concurrency is holding a lock for the *entire* call, not just the
+# gap before it.
+#
+# Every container here bind-mounts the same host directory
+# (`.:/app/gene_agent`), so an flock on a small state file inside that
+# mount gives every process — regardless of container — a real cross-process
+# mutex: at most one NVIDIA call, from any of these processes, is ever in
+# flight at a time. That's a stricter guarantee than the free-tier's
+# 16-concurrent cap needs, but on a free tier "well under the limit" is the
+# right target, not "right up against it". The min-interval pacing is kept
+# on top of that as a courtesy gap between one call finishing and the next
+# starting, not as the primary defense anymore.
 # ---------------------------------------------------------------------------
 _LLM_GATE = threading.Semaphore(1)
 _pace_lock = threading.Lock()
 _last_call_started_at = 0.0
-MIN_CALL_INTERVAL_SECONDS = float(os.getenv("NVIDIA_LLM_MIN_INTERVAL", "1.0"))
+MIN_CALL_INTERVAL_SECONDS = float(os.getenv("NVIDIA_LLM_MIN_INTERVAL", "1.5"))
+
+# Shared across every process that checks out this repo (dev machine or any
+# docker-compose service), since they all mount the same gene_agent/ dir.
+_PACE_STATE_FILE = Path(__file__).parent.parent / ".nim_pace_state"
 
 
-def _pace() -> None:
-    """Block until at least MIN_CALL_INTERVAL_SECONDS has passed since the
-    previous call was allowed to start."""
-    global _last_call_started_at
-    with _pace_lock:
-        now = time.monotonic()
-        wait = MIN_CALL_INTERVAL_SECONDS - (now - _last_call_started_at)
-        if wait > 0:
-            time.sleep(wait)
-        _last_call_started_at = time.monotonic()
+@contextlib.contextmanager
+def _llm_call_slot():
+    """Cross-process mutex held for the *entire* duration of one NVIDIA
+    call (including any retries/backoff inside it) — not just the pacing
+    gap before it starts. This is what actually caps concurrent in-flight
+    requests across every process sharing this key; see the module-level
+    comment above for why pacing alone can't do that.
+
+    Falls back to in-process-only locking (the original behavior) if flock
+    isn't available (e.g. a non-POSIX dev environment) or the state file
+    can't be opened, so a missing lock never becomes a hard failure — it
+    just quietly loses the cross-process guarantee.
+    """
+    if fcntl is None:
+        with _LLM_GATE:
+            yield
+        return
+
+    try:
+        _PACE_STATE_FILE.touch(exist_ok=True)
+        f = open(_PACE_STATE_FILE, "r+")
+    except OSError as exc:
+        logger.warning(
+            "Cross-process NVIDIA locking unavailable (%s) — falling back "
+            "to in-process locking only for this call.",
+            exc,
+        )
+        with _LLM_GATE:
+            yield
+        return
+
+    try:
+        # Blocks here until no other process anywhere has a call in flight.
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            raw = f.read().strip()
+            last = float(raw) if raw else 0.0
+            wait = MIN_CALL_INTERVAL_SECONDS - (time.time() - last)
+            if wait > 0:
+                time.sleep(wait)
+            yield
+        finally:
+            f.seek(0)
+            f.truncate()
+            f.write(repr(time.time()))
+            fcntl.flock(f, fcntl.LOCK_UN)
+    finally:
+        f.close()
 
 
 @lru_cache(maxsize=None)
@@ -195,11 +258,15 @@ def invoke_with_retry(
     Pass max_retries > 1 to ride out a genuinely transient 503 capacity dip
     (worth doing — those often clear within a couple seconds). It has no
     effect on 429 handling.
+
+    The whole attempt sequence (including backoff sleeps between retries)
+    runs inside one _llm_call_slot() acquisition, so a retry here can't
+    interleave with another process's call and re-trigger the same
+    concurrent-request-limit error it's trying to recover from.
     """
     last_exc: Exception | None = None
-    for attempt in range(max_retries):
-        with _LLM_GATE:
-            _pace()
+    with _llm_call_slot():
+        for attempt in range(max_retries):
             try:
                 return invoke_fn()
             except Exception as exc:

@@ -392,7 +392,12 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                 max_retries=4,
             )
         except Exception as exc:
-            logger.info("LLM genome metadata failed: %s", summarize_llm_error(exc))
+            # WARNING, not INFO — see the matching comment in
+            # species_resolver.py's resolve_species_llm. With the root
+            # logger at WARNING (scripts/run_genome_metadata_scenarios.py),
+            # this was the line that made a real 429/503 indistinguishable
+            # from a merely-slow client: it never reached stderr at INFO.
+            logger.warning("LLM genome metadata failed: %s", summarize_llm_error(exc))
             return None
 
         tool_calls = response.tool_calls or []
