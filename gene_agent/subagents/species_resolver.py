@@ -275,7 +275,30 @@ async def resolve_species_llm(species_name: str) -> dict | None:
     # catch the "found candidates, never looked up an assembly, gave up
     # anyway" shortcut a weaker model is prone to taking.
     any_taxonomy_hit = False
+    # True the moment any single search_taxonomy call has returned MORE
+    # THAN ONE candidate — i.e. a genuinely ambiguous query like "elephant"
+    # (African savanna elephant, African forest elephant, Asian elephant,
+    # ...). Rule 2 in the system prompt says to lower confidence when
+    # ambiguity remains, but that's only a suggestion the model can (and,
+    # in a live run, did) ignore — it settled on one candidate, found a
+    # real RefSeq assembly for it, and reported confidence=1.0 with
+    # reasoning claiming "a single exact match", directly contradicting
+    # its own earlier multi-candidate search_taxonomy result. This flag
+    # lets the code catch that contradiction instead of trusting the
+    # model's self-report.
+    taxonomy_ambiguous = False
     assembly_lookup_attempted = False
+    # Distinct tax_ids that search_assembly_by_taxid has actually been
+    # called for so far (manually by the model, or via auto-escalation
+    # below). Needed because "elephant"-style queries return *multiple*
+    # taxonomy candidates: assembly_lookup_attempted alone only records
+    # that *a* lookup happened, so once the first candidate's lookup came
+    # back empty the old code treated the whole species as exhausted and
+    # accepted a null submission without ever trying candidate #2 or #3.
+    # Tracking which specific tax_ids were tried lets the guard below keep
+    # escalating through the remaining untried candidates instead of
+    # stopping after the first miss.
+    attempted_tax_ids: set[str] = set()
     # Consecutive times each guard below has fired with no progress in
     # between. Live runs showed the smaller model can just re-emit the
     # identical rejected SpeciesResolverOutput call step after step,
@@ -373,12 +396,17 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                     seen_tool_results.extend(result)
                     if result:
                         any_taxonomy_hit = True
+                    if len(result) > 1:
+                        taxonomy_ambiguous = True
                     step_trace.append(f"step {step + 1}: search_taxonomy({call_args}) -> {len(result)} result(s)")
                 else:
                     step_trace.append(f"step {step + 1}: search_taxonomy({call_args}) -> {str(result)[:120]!r}")
 
             elif call_name == "search_assembly_by_taxid":
                 assembly_lookup_attempted = True
+                tax_id_arg = call_args.get("tax_id")
+                if tax_id_arg is not None:
+                    attempted_tax_ids.add(str(tax_id_arg))
                 try:
                     result = await search_assembly_by_taxid.ainvoke(call_args)
                 except Exception as exc:
@@ -438,93 +466,126 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                     #     makes that real tool call itself and hands the
                     #     model the result, rather than keep asking.
                     #   - "come up with a better spelling" genuinely does
-                    #     require judgment the code can't fake. After 2
-                    #     stalls there's no honest mechanical fallback, so
-                    #     the guard relaxes and accepts the null rather
-                    #     than looping to step exhaustion for no benefit.
-                    if any_taxonomy_hit and not assembly_lookup_attempted:
+                    #     require judgment the code can't fake, so unlike
+                    #     the assembly-lookup guard above, this one never
+                    #     auto-escalates or relaxes on a stall count alone.
+                    #     A stall here means the model re-emitted the exact
+                    #     same rejected null submission instead of making a
+                    #     second search_taxonomy call — that's not "tried
+                    #     and failed to reformulate", it's "didn't try", and
+                    #     accepting null at that point would let the output
+                    #     falsely claim a reformulation attempt that never
+                    #     happened. So this guard just keeps rejecting; if
+                    #     the model truly never reformulates, max_steps
+                    #     exhausts and the caller's deterministic NCBI
+                    #     fallback takes over instead (see resolve_species).
+                    # All distinct candidate tax_ids search_taxonomy has surfaced
+                    # so far, in the order first seen, minus whichever ones have
+                    # already had a search_assembly_by_taxid lookup (manual or
+                    # auto-escalated). If this is non-empty, the model still has
+                    # unexplored candidates and a null submission is premature —
+                    # this is what lets "elephant" (3 candidates) keep going past
+                    # the first candidate's empty result instead of stopping there.
+                    candidate_tax_ids = list(
+                        dict.fromkeys(
+                            str(item["tax_id"])
+                            for item in seen_tool_results
+                            if isinstance(item, dict) and item.get("tax_id")
+                        )
+                    )
+                    untried_tax_ids = [t for t in candidate_tax_ids if t not in attempted_tax_ids]
+
+                    if any_taxonomy_hit and untried_tax_ids:
                         consecutive_assembly_guard_hits += 1
-                        step_trace.append(
-                            f"step {step + 1}: SpeciesResolverOutput rejected — "
-                            "null submitted without ever calling search_assembly_by_taxid"
-                        )
-                        messages.append(
-                            ToolMessage(
-                                content=(
-                                    "Error: search_taxonomy returned candidate(s), but you "
-                                    "never called search_assembly_by_taxid for any of them. "
-                                    "Pick the most plausible candidate tax_id and call "
-                                    "search_assembly_by_taxid before submitting assembly_id=null "
-                                    "— only give up if that lookup also fails to find an assembly."
-                                ),
-                                tool_call_id=call_id,
-                            )
-                        )
-                        if consecutive_assembly_guard_hits >= 2:
-                            best_candidate = next(
-                                (
-                                    item for item in seen_tool_results
-                                    if isinstance(item, dict) and item.get("tax_id")
-                                ),
-                                None,
-                            )
-                            if best_candidate is not None:
-                                tax_id = best_candidate["tax_id"]
-                                auto_call_id = f"auto-{step}-{call_id}"
-                                try:
-                                    auto_result = await search_assembly_by_taxid.ainvoke({"tax_id": tax_id})
-                                except Exception as exc:
-                                    auto_result = f"Error: {exc}"
-                                assembly_lookup_attempted = True
-                                if isinstance(auto_result, list):
-                                    seen_tool_results.extend(auto_result)
-                                step_trace.append(
-                                    f"step {step + 1}: auto-escalation — model stalled "
-                                    f"{consecutive_assembly_guard_hits}x, system called "
-                                    f"search_assembly_by_taxid({{'tax_id': {tax_id!r}}}) on its "
-                                    f"behalf -> {len(auto_result) if isinstance(auto_result, list) else 0} result(s)"
-                                )
-                                messages.append(
-                                    AIMessage(
-                                        content="",
-                                        tool_calls=[
-                                            {
-                                                "id": auto_call_id,
-                                                "name": "search_assembly_by_taxid",
-                                                "args": {"tax_id": tax_id},
-                                                "type": "tool_call",
-                                            }
-                                        ],
-                                    )
-                                )
-                                messages.append(ToolMessage(content=str(auto_result), tool_call_id=auto_call_id))
-                        continue
-                    if not any_taxonomy_hit and len(taxonomy_queries_tried) < 2:
-                        consecutive_reformulation_guard_hits += 1
-                        if consecutive_reformulation_guard_hits >= 2:
+                        if assembly_lookup_attempted:
                             step_trace.append(
-                                f"step {step + 1}: reformulation guard relaxed after "
-                                f"{consecutive_reformulation_guard_hits} stalls — no mechanical "
-                                "fallback for 'guess a better spelling', accepting null"
+                                f"step {step + 1}: SpeciesResolverOutput rejected — "
+                                f"null submitted with {len(untried_tax_ids)} candidate(s) still "
+                                "untried after an earlier lookup came back empty"
+                            )
+                            reject_text = (
+                                f"Error: that candidate's search_assembly_by_taxid lookup found "
+                                f"nothing, but {len(untried_tax_ids)} other taxonomy candidate(s) "
+                                "have not been tried yet. Call search_assembly_by_taxid for "
+                                f"tax_id {untried_tax_ids[0]!r} (or another untried candidate) "
+                                "before submitting assembly_id=null — only give up once every "
+                                "candidate's lookup has failed."
                             )
                         else:
                             step_trace.append(
                                 f"step {step + 1}: SpeciesResolverOutput rejected — "
-                                "null submitted after only one search_taxonomy attempt"
+                                "null submitted without ever calling search_assembly_by_taxid"
+                            )
+                            reject_text = (
+                                "Error: search_taxonomy returned candidate(s), but you "
+                                "never called search_assembly_by_taxid for any of them. "
+                                "Pick the most plausible candidate tax_id and call "
+                                "search_assembly_by_taxid before submitting assembly_id=null "
+                                "— only give up if that lookup also fails to find an assembly."
+                            )
+                        messages.append(ToolMessage(content=reject_text, tool_call_id=call_id))
+                        if consecutive_assembly_guard_hits >= 2:
+                            tax_id = untried_tax_ids[0]
+                            auto_call_id = f"auto-{step}-{call_id}"
+                            try:
+                                auto_result = await search_assembly_by_taxid.ainvoke({"tax_id": tax_id})
+                            except Exception as exc:
+                                auto_result = f"Error: {exc}"
+                            assembly_lookup_attempted = True
+                            attempted_tax_ids.add(tax_id)
+                            if isinstance(auto_result, list):
+                                seen_tool_results.extend(auto_result)
+                            step_trace.append(
+                                f"step {step + 1}: auto-escalation — model stalled "
+                                f"{consecutive_assembly_guard_hits}x, system called "
+                                f"search_assembly_by_taxid({{'tax_id': {tax_id!r}}}) on its "
+                                f"behalf -> {len(auto_result) if isinstance(auto_result, list) else 0} result(s)"
                             )
                             messages.append(
-                                ToolMessage(
-                                    content=(
-                                        "Error: search_taxonomy returned no results, but you have "
-                                        "not yet tried a reformulated query (fix a possible typo, "
-                                        "drop a qualifier word, or try a synonym). Try ONE "
-                                        "reformulated search_taxonomy call before submitting "
-                                        "assembly_id=null."
-                                    ),
-                                    tool_call_id=call_id,
+                                AIMessage(
+                                    content="",
+                                    tool_calls=[
+                                        {
+                                            "id": auto_call_id,
+                                            "name": "search_assembly_by_taxid",
+                                            "args": {"tax_id": tax_id},
+                                            "type": "tool_call",
+                                        }
+                                    ],
                                 )
                             )
-                            continue
+                            messages.append(ToolMessage(content=str(auto_result), tool_call_id=auto_call_id))
+                            # Reset the stall counter after an auto-escalation: the
+                            # model now has a fresh result to react to, and the next
+                            # rejection (if any) is against a *different* remaining
+                            # candidate, not a repeat of the same stall.
+                            consecutive_assembly_guard_hits = 0
+                        continue
+                    if not any_taxonomy_hit and len(taxonomy_queries_tried) < 2:
+                        consecutive_reformulation_guard_hits += 1
+                        step_trace.append(
+                            f"step {step + 1}: SpeciesResolverOutput rejected — "
+                            f"null submitted after only {len(taxonomy_queries_tried)} distinct "
+                            f"search_taxonomy attempt(s) (stall #{consecutive_reformulation_guard_hits})"
+                        )
+                        reformulation_text = (
+                            "Error: search_taxonomy returned no results, but you have "
+                            "not yet tried a reformulated query (fix a possible typo, "
+                            "drop a qualifier word, or try a synonym). Try ONE "
+                            "reformulated search_taxonomy call before submitting "
+                            "assembly_id=null."
+                        )
+                        if consecutive_reformulation_guard_hits >= 2:
+                            reformulation_text += (
+                                " You have resubmitted the same null result without making a "
+                                "new search_taxonomy call — you must actually CALL the "
+                                "search_taxonomy tool with different text, not just resubmit "
+                                "SpeciesResolverOutput again."
+                            )
+                        messages.append(
+                            ToolMessage(content=reformulation_text, tool_call_id=call_id)
+                        )
+                        continue
 
                 if parsed.assembly_id is not None:
                     grounded = any(
@@ -542,6 +603,27 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                                     f"Error: assembly_id '{parsed.assembly_id}' not found in any "
                                     "tool result. Please search for assemblies first and use an "
                                     "assembly_id from the results."
+                                ),
+                                tool_call_id=call_id,
+                            )
+                        )
+                        continue
+
+                    if taxonomy_ambiguous and parsed.confidence >= 1.0:
+                        step_trace.append(
+                            f"step {step + 1}: SpeciesResolverOutput rejected — "
+                            "confidence=1.0 submitted despite an ambiguous search_taxonomy result"
+                        )
+                        messages.append(
+                            ToolMessage(
+                                content=(
+                                    "Error: search_taxonomy returned multiple candidates for this "
+                                    "query, so per rule 2 this is an ambiguous case even though you "
+                                    "found a valid assembly for the candidate you picked. confidence "
+                                    "must be below 1.0 (e.g. 0.6-0.9 depending on how confident you "
+                                    "are in your disambiguation) and reasoning must acknowledge that "
+                                    "other candidates existed and explain why you picked this one. "
+                                    "Resubmit SpeciesResolverOutput with an honest confidence value."
                                 ),
                                 tool_call_id=call_id,
                             )

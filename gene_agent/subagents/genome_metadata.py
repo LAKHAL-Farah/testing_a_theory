@@ -341,6 +341,28 @@ def _check_duplicate_tool_call(
     return False, None
 
 
+# Coarse ordering of NCBI assembly-level strings, used only to compare two
+# *already-seen* candidates against each other — not an authoritative
+# genomics ranking. "Complete Genome" here refers to the assembly-level
+# label NCBI reports (e.g. for a T2T assembly), not the RefSeq/GenBank
+# category.
+_LEVEL_RANK = {"Complete Genome": 4, "Chromosome": 3, "Scaffold": 2, "Contig": 1}
+
+
+def _assembly_rank(assembly_id: str, info: dict) -> tuple[int, int]:
+    """Rank a candidate assembly for substitution purposes.
+
+    RefSeq status (GCF_ prefix) is weighted above assembly_level: per rule
+    3 in the system prompt, an authoritative RefSeq record is the intended
+    "better" pick even when a newer GenBank-only assembly reports an
+    equal or nominally higher assembly_level. Only among two assemblies
+    with the same RefSeq status does assembly_level break the tie.
+    """
+    is_refseq = 1 if assembly_id.startswith("GCF_") else 0
+    level = (info or {}).get("assembly_level") or ""
+    return (is_refseq, _LEVEL_RANK.get(level, 0))
+
+
 async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None) -> dict | None:
     """Use the LLM with tool calling to fetch genome metadata for an assembly.
 
@@ -378,6 +400,41 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
     # species_resolver.py grounds assembly_id — nothing previously stopped the
     # model from substituting an assembly_id_used it never actually looked up.
     seen_assembly_ids: set[str] = {assembly_id}
+    # assembly_id -> {"assembly_level": ...} for every candidate actually
+    # returned by fetch_assembly_stats or list_alternate_assemblies, so a
+    # final assembly_id_used can be checked against the *best* candidate
+    # that was actually seen — not just "was it grounded at all". Without
+    # this, nothing stops the model from keeping a genuinely inferior
+    # GenBank assembly and reporting a self-contradictory "already RefSeq"
+    # reasoning for it, which is exactly the zebrafish substitution
+    # failure seen live.
+    seen_assembly_info: dict[str, dict] = {}
+    # assembly_ids for which fetch_assembly_stats (not just
+    # list_alternate_assemblies, which doesn't carry genome_size_bp /
+    # chromosome_count) has actually been called — the final
+    # assembly_id_used must be one of these, or the numeric stats being
+    # submitted for it were never actually fetched.
+    full_stats_fetched: set[str] = set()
+    # True once list_alternate_assemblies has been called at least once.
+    # Rule 1a requires this before a final submission; nothing previously
+    # enforced it, so a model could submit right after the first
+    # fetch_assembly_stats call and never learn a better assembly existed.
+    alternates_checked = False
+    # tax_id discovered from the first fetch_assembly_stats result, kept
+    # around so a stalled model can be auto-escalated straight into
+    # list_alternate_assemblies (mirrors species_resolver.py's mechanical
+    # auto-escalation for a guard that has a genuinely mechanical fix).
+    discovered_tax_id: str | None = None
+    # Consecutive times each new guard below has fired with no progress in
+    # between — same rationale and pattern as species_resolver.py's
+    # consecutive_*_guard_hits: a weaker model can just re-emit the same
+    # rejected GenomeMetadataOutput call instead of acting on the
+    # ToolMessage feedback, burning the whole max_steps budget. Once a
+    # guard is mechanically fixable (both of these are — "call this tool
+    # with this argument" is not a judgment call), the code just makes
+    # the call itself after 2 stalls instead of continuing to ask.
+    consecutive_alternates_guard_hits = 0
+    consecutive_substitution_guard_hits = 0
     # Human-readable trace of what happened at each step, logged on
     # exhaustion — see the matching mechanism in species_resolver.py's
     # resolve_species_llm for the rationale.
@@ -459,9 +516,44 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                 messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
                 if isinstance(result, dict) and result.get("assembly_id"):
                     seen_assembly_ids.add(result["assembly_id"])
+                    seen_assembly_info[result["assembly_id"]] = {
+                        "assembly_level": result.get("assembly_level"),
+                    }
+                    full_stats_fetched.add(result["assembly_id"])
+                    if discovered_tax_id is None and result.get("tax_id"):
+                        discovered_tax_id = str(result["tax_id"])
                 step_trace.append(f"step {step + 1}: fetch_assembly_stats({call_args}) -> {str(result)[:120]!r}")
 
             elif call_name == "list_alternate_assemblies":
+                # Guard against a wrong/hallucinated tax_id satisfying the
+                # "you must call list_alternate_assemblies" requirement
+                # below without actually looking up the right species —
+                # e.g. the model invents a tax_id before ever reading the
+                # real one off the fetch_assembly_stats result, or reuses
+                # a stale one. That call would "count" as having checked
+                # alternates while actually returning zero (or wrong)
+                # results, letting a false "only one assembly exists"
+                # conclusion through untouched.
+                call_tax_id = str(call_args.get("tax_id", "")).strip()
+                if discovered_tax_id is not None and call_tax_id and call_tax_id != discovered_tax_id:
+                    step_trace.append(
+                        f"step {step + 1}: list_alternate_assemblies({call_args}) rejected — "
+                        f"tax_id {call_tax_id!r} does not match {discovered_tax_id!r} from "
+                        "fetch_assembly_stats"
+                    )
+                    messages.append(
+                        ToolMessage(
+                            content=(
+                                f"Error: tax_id {call_tax_id!r} does not match the tax_id "
+                                f"({discovered_tax_id!r}) returned by fetch_assembly_stats for "
+                                f"this assembly. Call list_alternate_assemblies with "
+                                f"tax_id={discovered_tax_id!r} instead."
+                            ),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
+                alternates_checked = True
                 try:
                     result = await list_alternate_assemblies.ainvoke(call_args)
                 except Exception as exc:
@@ -473,6 +565,15 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                         for item in result
                         if isinstance(item, dict) and item.get("assembly_id")
                     )
+                    for item in result:
+                        if isinstance(item, dict) and item.get("assembly_id"):
+                            # Don't clobber a fuller entry already populated
+                            # by fetch_assembly_stats (which also carries
+                            # numeric stats) with this leaner one.
+                            seen_assembly_info.setdefault(
+                                item["assembly_id"],
+                                {"assembly_level": item.get("assembly_level")},
+                            )
                     step_trace.append(
                         f"step {step + 1}: list_alternate_assemblies({call_args}) -> {len(result)} result(s)"
                     )
@@ -517,6 +618,150 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                     )
                     continue
 
+                if not alternates_checked:
+                    consecutive_alternates_guard_hits += 1
+                    step_trace.append(
+                        f"step {step + 1}: GenomeMetadataOutput rejected — "
+                        "submitted without ever calling list_alternate_assemblies"
+                    )
+                    messages.append(
+                        ToolMessage(
+                            content=(
+                                "Error: you must call list_alternate_assemblies (using the "
+                                "tax_id from fetch_assembly_stats) before submitting "
+                                "GenomeMetadataOutput, so any better available assembly can "
+                                "actually be considered rather than assumed."
+                            ),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    if consecutive_alternates_guard_hits >= 2 and discovered_tax_id is not None:
+                        auto_call_id = f"auto-{step}-{call_id}"
+                        try:
+                            auto_result = await list_alternate_assemblies.ainvoke(
+                                {"tax_id": discovered_tax_id}
+                            )
+                        except Exception as exc:
+                            auto_result = f"Error: {exc}"
+                        alternates_checked = True
+                        if isinstance(auto_result, list):
+                            for item in auto_result:
+                                if isinstance(item, dict) and item.get("assembly_id"):
+                                    seen_assembly_ids.add(item["assembly_id"])
+                                    seen_assembly_info.setdefault(
+                                        item["assembly_id"],
+                                        {"assembly_level": item.get("assembly_level")},
+                                    )
+                        step_trace.append(
+                            f"step {step + 1}: auto-escalation — model stalled "
+                            f"{consecutive_alternates_guard_hits}x, system called "
+                            f"list_alternate_assemblies({{'tax_id': {discovered_tax_id!r}}}) on its "
+                            f"behalf -> {len(auto_result) if isinstance(auto_result, list) else 0} result(s)"
+                        )
+                        messages.append(
+                            AIMessage(
+                                content="",
+                                tool_calls=[
+                                    {
+                                        "id": auto_call_id,
+                                        "name": "list_alternate_assemblies",
+                                        "args": {"tax_id": discovered_tax_id},
+                                        "type": "tool_call",
+                                    }
+                                ],
+                            )
+                        )
+                        messages.append(ToolMessage(content=str(auto_result), tool_call_id=auto_call_id))
+                        consecutive_alternates_guard_hits = 0
+                    continue
+
+                if seen_assembly_info:
+                    best_id = max(
+                        seen_assembly_info,
+                        key=lambda aid: _assembly_rank(aid, seen_assembly_info[aid]),
+                    )
+                    best_rank = _assembly_rank(best_id, seen_assembly_info[best_id])
+                    current_rank = _assembly_rank(
+                        parsed.assembly_id_used, seen_assembly_info.get(parsed.assembly_id_used, {})
+                    )
+                    if best_id != parsed.assembly_id_used and best_rank > current_rank:
+                        consecutive_substitution_guard_hits += 1
+                        step_trace.append(
+                            f"step {step + 1}: GenomeMetadataOutput rejected — "
+                            f"kept {parsed.assembly_id_used!r} despite better candidate {best_id!r} "
+                            f"(level {seen_assembly_info[best_id].get('assembly_level')!r}) already seen"
+                        )
+                        messages.append(
+                            ToolMessage(
+                                content=(
+                                    f"Error: {best_id!r} "
+                                    f"(assembly_level={seen_assembly_info[best_id].get('assembly_level')!r}) "
+                                    f"is a genuinely better assembly than {parsed.assembly_id_used!r} "
+                                    "among the ones you have already looked up "
+                                    f"({'RefSeq vs. GenBank' if best_id.startswith('GCF_') and not parsed.assembly_id_used.startswith('GCF_') else 'higher assembly level'}). "
+                                    "Per rule 3, substitute to it: if you have not already called "
+                                    f"fetch_assembly_stats for {best_id!r}, do so now to get its "
+                                    "numeric stats, then resubmit GenomeMetadataOutput with "
+                                    f"assembly_id_used={best_id!r} and reasoning explaining the substitution."
+                                ),
+                                tool_call_id=call_id,
+                            )
+                        )
+                        if consecutive_substitution_guard_hits >= 2:
+                            auto_call_id = f"auto-{step}-{call_id}"
+                            try:
+                                auto_result = await fetch_assembly_stats.ainvoke({"assembly_id": best_id})
+                            except Exception as exc:
+                                auto_result = f"Error: {exc}"
+                            if isinstance(auto_result, dict) and auto_result.get("assembly_id"):
+                                seen_assembly_ids.add(auto_result["assembly_id"])
+                                seen_assembly_info[auto_result["assembly_id"]] = {
+                                    "assembly_level": auto_result.get("assembly_level"),
+                                }
+                                full_stats_fetched.add(auto_result["assembly_id"])
+                            step_trace.append(
+                                f"step {step + 1}: auto-escalation — model stalled "
+                                f"{consecutive_substitution_guard_hits}x, system called "
+                                f"fetch_assembly_stats({{'assembly_id': {best_id!r}}}) on its "
+                                "behalf"
+                            )
+                            messages.append(
+                                AIMessage(
+                                    content="",
+                                    tool_calls=[
+                                        {
+                                            "id": auto_call_id,
+                                            "name": "fetch_assembly_stats",
+                                            "args": {"assembly_id": best_id},
+                                            "type": "tool_call",
+                                        }
+                                    ],
+                                )
+                            )
+                            messages.append(ToolMessage(content=str(auto_result), tool_call_id=auto_call_id))
+                            consecutive_substitution_guard_hits = 0
+                        continue
+
+                if parsed.assembly_id_used not in full_stats_fetched:
+                    step_trace.append(
+                        f"step {step + 1}: GenomeMetadataOutput rejected — "
+                        f"assembly_id_used {parsed.assembly_id_used!r} has no fetch_assembly_stats "
+                        "result to ground its numeric fields"
+                    )
+                    messages.append(
+                        ToolMessage(
+                            content=(
+                                f"Error: you have not called fetch_assembly_stats for "
+                                f"{parsed.assembly_id_used!r} yet, so its genome_size_bp / "
+                                "chromosome_count cannot be grounded (list_alternate_assemblies "
+                                "alone does not provide those numbers). Call fetch_assembly_stats "
+                                f"for {parsed.assembly_id_used!r} first, then resubmit."
+                            ),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
+
                 if not parsed.reasoning or not parsed.reasoning.strip():
                     step_trace.append(f"step {step + 1}: GenomeMetadataOutput rejected — empty reasoning")
                     messages.append(
@@ -531,6 +776,23 @@ async def resolve_metadata_llm(species_name: str, assembly_id: str | None = None
                     )
                     continue
 
+                # A successful return is otherwise completely silent — only
+                # the exhaustion path (below) previously logged anything.
+                # That made a run which *converges* to a wrong answer
+                # (guards fired, model resubmitted the same thing, or a
+                # guard simply never found grounds to object) indistinguishable
+                # from a genuinely clean single-shot success. Surface the
+                # trace at WARNING whenever any rejection happened along the
+                # way, so "it returned an answer" and "it returned the
+                # *right* answer without a fight" can actually be told apart
+                # from the CLI output.
+                if any("rejected" in line for line in step_trace):
+                    logger.warning(
+                        "LLM genome metadata for assembly %r converged after guard "
+                        "rejection(s). Trace:\n%s",
+                        assembly_id,
+                        "\n".join(f"  {line}" for line in step_trace),
+                    )
                 return parsed.model_dump()
 
             else:
