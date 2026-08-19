@@ -235,13 +235,23 @@ async def scenario_grounding_fabricated_id() -> dict:
 
     fabricated_id = "GCF_FAKE_999999999.1"
     captured_assembly_results: list[dict] = []
-    real_assembly_ainvoke = sr.search_assembly_by_taxid.ainvoke
+    # Spy on the plain async core function, NOT sr.search_assembly_by_taxid
+    # itself: that's a langchain @tool-wrapped StructuredTool, which is a
+    # pydantic v2 BaseModel under the hood. Newer pydantic/langchain-core
+    # reject assigning arbitrary attributes (like .ainvoke) onto a
+    # BaseModel instance ("object has no field ..."), so patching the tool
+    # object directly breaks. Patching the underlying _core function is
+    # exactly what scenario 3 (reformulation-retry) already does for
+    # _search_taxonomy_core, for the same reason — the @tool wrapper calls
+    # the module-level _core function by name at call time, so replacing
+    # the module attribute is visible to it without touching the tool.
+    real_search_assembly_by_taxid_core = sr._search_assembly_by_taxid_core
 
-    async def _assembly_spy(args):
+    async def _assembly_spy(tax_id):
         # Spy, not a mock: the real tool still runs and hits live NCBI. We
         # just also keep a copy of what it returned so the scripted "model"
         # below can submit a real, grounded id afterwards.
-        result = await real_assembly_ainvoke(args)
+        result = await real_search_assembly_by_taxid_core(tax_id)
         captured_assembly_results.clear()
         if isinstance(result, list):
             captured_assembly_results.extend(result)
@@ -311,14 +321,14 @@ async def scenario_grounding_fabricated_id() -> dict:
 
     real_get_llm_client = sr.get_llm_client
     sr.get_llm_client = lambda: client
-    sr.search_assembly_by_taxid.ainvoke = _assembly_spy
+    sr._search_assembly_by_taxid_core = _assembly_spy
     try:
         t0 = time.monotonic()
         result = await sr.resolve_species_llm("tiger")
         elapsed = time.monotonic() - t0
     finally:
         sr.get_llm_client = real_get_llm_client
-        sr.search_assembly_by_taxid.ainvoke = real_assembly_ainvoke
+        sr._search_assembly_by_taxid_core = real_search_assembly_by_taxid_core
 
     _kv("result", result)
     _kv("real assemblies seen", captured_assembly_results)

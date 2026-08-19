@@ -266,6 +266,26 @@ async def resolve_species_llm(species_name: str) -> dict | None:
     ]
 
     seen_tool_results: list[dict] = []
+    # Distinct search_taxonomy query strings tried so far (used to require
+    # a genuine reformulation, not just a repeat, before a null submission
+    # is accepted — see the premature-null guard below).
+    taxonomy_queries_tried: set[str] = set()
+    # True the moment any search_taxonomy call has returned at least one
+    # candidate. Used together with assembly_lookup_attempted below to
+    # catch the "found candidates, never looked up an assembly, gave up
+    # anyway" shortcut a weaker model is prone to taking.
+    any_taxonomy_hit = False
+    assembly_lookup_attempted = False
+    # Consecutive times each guard below has fired with no progress in
+    # between. Live runs showed the smaller model can just re-emit the
+    # identical rejected SpeciesResolverOutput call step after step,
+    # ignoring the ToolMessage feedback entirely — burning the whole
+    # max_steps budget on 8 copies of the same rejection rather than
+    # actually calling search_assembly_by_taxid or reformulating. These
+    # counters let the loop stop *asking* and start *acting* once it's
+    # clear asking isn't working.
+    consecutive_assembly_guard_hits = 0
+    consecutive_reformulation_guard_hits = 0
     # Human-readable trace of what happened at each step, logged on
     # exhaustion so a silent non-convergence (as opposed to an API error)
     # is actually diagnosable instead of just "SKIP" — see the log call
@@ -343,6 +363,7 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                 continue
 
             if call_name == "search_taxonomy":
+                taxonomy_queries_tried.add(json.dumps(call_args, sort_keys=True))
                 try:
                     result = await search_taxonomy.ainvoke(call_args)
                 except Exception as exc:
@@ -350,11 +371,14 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                 messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
                 if isinstance(result, list):
                     seen_tool_results.extend(result)
+                    if result:
+                        any_taxonomy_hit = True
                     step_trace.append(f"step {step + 1}: search_taxonomy({call_args}) -> {len(result)} result(s)")
                 else:
                     step_trace.append(f"step {step + 1}: search_taxonomy({call_args}) -> {str(result)[:120]!r}")
 
             elif call_name == "search_assembly_by_taxid":
+                assembly_lookup_attempted = True
                 try:
                     result = await search_assembly_by_taxid.ainvoke(call_args)
                 except Exception as exc:
@@ -386,6 +410,121 @@ async def resolve_species_llm(species_name: str) -> dict | None:
                         )
                     )
                     continue
+
+                if parsed.assembly_id is None:
+                    # Spec §4 rules 2/3 require the model to actually try
+                    # before giving up: reformulate once on an empty
+                    # search_taxonomy, and look up an assembly for at
+                    # least one candidate before submitting null. Without
+                    # this check those rules are only suggestions in the
+                    # prompt — a weaker model reliably skips straight to
+                    # a null submission the moment ambiguity or an empty
+                    # result appears, which is exactly the "elephant"/
+                    # "house mouse"/reformulation failures seen in live
+                    # scenario runs. This mirrors the grounding check
+                    # above: reject-and-reprompt, not a fatal error.
+                    #
+                    # A live run showed reject-and-reprompt alone isn't
+                    # enough: the smaller model can just re-emit the exact
+                    # same rejected null submission every step, ignoring
+                    # the ToolMessage feedback, burning the whole
+                    # max_steps budget on identical rejections instead of
+                    # ever calling search_assembly_by_taxid. The two
+                    # branches below escalate differently after repeated
+                    # stalls, because they're not equally fixable:
+                    #   - "call search_assembly_by_taxid for a candidate
+                    #     you already have" is NOT a judgment call — it's
+                    #     mechanical, so after 2 stalls the code just
+                    #     makes that real tool call itself and hands the
+                    #     model the result, rather than keep asking.
+                    #   - "come up with a better spelling" genuinely does
+                    #     require judgment the code can't fake. After 2
+                    #     stalls there's no honest mechanical fallback, so
+                    #     the guard relaxes and accepts the null rather
+                    #     than looping to step exhaustion for no benefit.
+                    if any_taxonomy_hit and not assembly_lookup_attempted:
+                        consecutive_assembly_guard_hits += 1
+                        step_trace.append(
+                            f"step {step + 1}: SpeciesResolverOutput rejected — "
+                            "null submitted without ever calling search_assembly_by_taxid"
+                        )
+                        messages.append(
+                            ToolMessage(
+                                content=(
+                                    "Error: search_taxonomy returned candidate(s), but you "
+                                    "never called search_assembly_by_taxid for any of them. "
+                                    "Pick the most plausible candidate tax_id and call "
+                                    "search_assembly_by_taxid before submitting assembly_id=null "
+                                    "— only give up if that lookup also fails to find an assembly."
+                                ),
+                                tool_call_id=call_id,
+                            )
+                        )
+                        if consecutive_assembly_guard_hits >= 2:
+                            best_candidate = next(
+                                (
+                                    item for item in seen_tool_results
+                                    if isinstance(item, dict) and item.get("tax_id")
+                                ),
+                                None,
+                            )
+                            if best_candidate is not None:
+                                tax_id = best_candidate["tax_id"]
+                                auto_call_id = f"auto-{step}-{call_id}"
+                                try:
+                                    auto_result = await search_assembly_by_taxid.ainvoke({"tax_id": tax_id})
+                                except Exception as exc:
+                                    auto_result = f"Error: {exc}"
+                                assembly_lookup_attempted = True
+                                if isinstance(auto_result, list):
+                                    seen_tool_results.extend(auto_result)
+                                step_trace.append(
+                                    f"step {step + 1}: auto-escalation — model stalled "
+                                    f"{consecutive_assembly_guard_hits}x, system called "
+                                    f"search_assembly_by_taxid({{'tax_id': {tax_id!r}}}) on its "
+                                    f"behalf -> {len(auto_result) if isinstance(auto_result, list) else 0} result(s)"
+                                )
+                                messages.append(
+                                    AIMessage(
+                                        content="",
+                                        tool_calls=[
+                                            {
+                                                "id": auto_call_id,
+                                                "name": "search_assembly_by_taxid",
+                                                "args": {"tax_id": tax_id},
+                                                "type": "tool_call",
+                                            }
+                                        ],
+                                    )
+                                )
+                                messages.append(ToolMessage(content=str(auto_result), tool_call_id=auto_call_id))
+                        continue
+                    if not any_taxonomy_hit and len(taxonomy_queries_tried) < 2:
+                        consecutive_reformulation_guard_hits += 1
+                        if consecutive_reformulation_guard_hits >= 2:
+                            step_trace.append(
+                                f"step {step + 1}: reformulation guard relaxed after "
+                                f"{consecutive_reformulation_guard_hits} stalls — no mechanical "
+                                "fallback for 'guess a better spelling', accepting null"
+                            )
+                        else:
+                            step_trace.append(
+                                f"step {step + 1}: SpeciesResolverOutput rejected — "
+                                "null submitted after only one search_taxonomy attempt"
+                            )
+                            messages.append(
+                                ToolMessage(
+                                    content=(
+                                        "Error: search_taxonomy returned no results, but you have "
+                                        "not yet tried a reformulated query (fix a possible typo, "
+                                        "drop a qualifier word, or try a synonym). Try ONE "
+                                        "reformulated search_taxonomy call before submitting "
+                                        "assembly_id=null."
+                                    ),
+                                    tool_call_id=call_id,
+                                )
+                            )
+                            continue
 
                 if parsed.assembly_id is not None:
                     grounded = any(

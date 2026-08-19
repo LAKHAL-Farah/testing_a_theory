@@ -191,9 +191,26 @@ def _llm_call_slot():
         f.close()
 
 
-@lru_cache(maxsize=None)
 def get_llm_client() -> BaseChatModel:
-    """Build (once) and reuse the ChatNVIDIA client.
+    """Return a ChatNVIDIA client for the *current* NVIDIA_API_KEY.
+
+    This function itself is deliberately NOT cached: it re-reads
+    os.getenv("NVIDIA_API_KEY") on every call so that a key being unset
+    (or rotated) mid-process is always observed immediately — e.g. by
+    scripts/run_species_resolver_scenarios.py's "LLM client unavailable"
+    scenario, which pops NVIDIA_API_KEY from os.environ and expects the
+    very next call to raise. The actual expensive work is delegated to
+    _build_llm_client, which IS cached — see its docstring.
+    """
+    api_key = os.getenv("NVIDIA_API_KEY")
+    if not api_key:
+        raise EnvironmentError("NVIDIA_API_KEY is not set")
+    return _build_llm_client(api_key)
+
+
+@lru_cache(maxsize=None)
+def _build_llm_client(api_key: str) -> BaseChatModel:
+    """Build (once per distinct api_key) and reuse the ChatNVIDIA client.
 
     Constructing ChatNVIDIA is not free: for a model not in the library's
     hardcoded registry (this one isn't — that's why you see the "type is
@@ -204,11 +221,15 @@ def get_llm_client() -> BaseChatModel:
     client — tripling both the network round trips per scenario and the
     requests counted against the free-tier cap, for zero benefit, since
     nothing about the client changes between calls in this process.
-    """
-    api_key = os.getenv("NVIDIA_API_KEY")
-    if not api_key:
-        raise EnvironmentError("NVIDIA_API_KEY is not set")
 
+    Cached by api_key (not zero-arg) so that a key rotation mid-process
+    still gets a client built against the new key, rather than silently
+    reusing whatever client happened to be built first. A previously-built
+    client for an old key is never returned once get_llm_client() sees a
+    different (or missing) key — the old bug this replaces was caching
+    with no key at all, so removing NVIDIA_API_KEY from os.environ had no
+    effect on an already-cached client.
+    """
     return ChatNVIDIA(
         model=MODEL_NAME,
         api_key=api_key,
