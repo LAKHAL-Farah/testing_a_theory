@@ -24,7 +24,13 @@ RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def _is_retryable(exc: Exception) -> bool:
-    if isinstance(exc, httpx.TimeoutException):
+    # httpx.TransportError covers TimeoutException *and* the other
+    # connection-level failures (ConnectError, ReadError, RemoteProtocolError,
+    # PoolTimeout, ...) that show up as transient blips in Docker/WSL
+    # networking — a dropped connection is just as retryable as a timeout,
+    # but was previously falling through uncaught below and killing the
+    # deterministic fallback outright instead of getting retried.
+    if isinstance(exc, httpx.TransportError):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in RETRYABLE_STATUS_CODES
@@ -63,7 +69,7 @@ async def request_with_retry(
             resp = await client.request(method, url, **kwargs)
             resp.raise_for_status()
             return resp
-        except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
             last_exc = exc
             if not _is_retryable(exc) or attempt == attempts - 1:
                 raise
