@@ -164,3 +164,30 @@ services:
     volumes:
       - .:/app
     command: python -m scripts.protein_data_scenarios --scenario all --verbose
+
+  # -------------------------------------------------------------------------
+  # Functional Evidence sub-orchestrator services
+  # -------------------------------------------------------------------------
+  test-functional-evidence-merge:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    command: pytest tests/test_functional_evidence_merge.py -v -s
+
+  test-suborchestrator-to-agent:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    command: pytest tests/integration/test_suborchestrator_to_agent.py -v -s
+
+  functional-evidence-scenarios:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    command: python -m scripts.functional_evidence_scenarios --scenario all --verbose

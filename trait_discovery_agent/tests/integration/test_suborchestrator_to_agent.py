@@ -170,6 +170,34 @@ async def test_one_agent_failing_does_not_affect_the_other(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_both_agents_succeeding_completes_the_suborchestrator(monkeypatch):
+    """§10 inverse case: both children resolve real data -> merge_node's
+    AND-of-failure rule (§0.2/§8) has nothing to fail on, so the
+    sub-orchestrator status is COMPLETED. Pathways uses the real KEGG fake;
+    Protein Data uses the single-hit candidate-list fake so it resolves
+    without ever touching the LLM boundary (§8's 'no decision needed' case),
+    keeping this purely a merge-logic test rather than an LLM test."""
+    kegg_log = CallLog()
+    uniprot_log = CallLog()
+    monkeypatch.setattr(pathways_module, "fetch_pathway", make_fake_kegg_client(kegg_log))
+    monkeypatch.setattr(
+        protein_data_module, "list_uniprot_candidates",
+        make_fake_uniprot_list_client(uniprot_log),
+    )
+
+    app = build_functional_evidence_graph()
+    result = await app.ainvoke(FunctionalEvidenceState(
+        gene_list=["FGF5"],
+        instruction="find functional evidence",
+        context={"kegg_gene_ids": {"FGF5": "hsa:FGF5"}, "tax_id": 9606},
+    ))
+
+    assert result["pathways_status"] == AgentStatus.COMPLETED
+    assert result["protein_data_status"] == AgentStatus.COMPLETED
+    assert result["status"] == AgentStatus.COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_both_agents_failing_fails_the_suborchestrator(monkeypatch):
     async def empty_kegg(kegg_gene_id):
         return None
