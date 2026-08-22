@@ -114,7 +114,7 @@ class TestMetadataNodeReconstructionDetection:
             "genome_agent.workflows.nodes.genome_data_nodes.get_genome_metadata",
             new=AsyncMock(return_value=metadata_return),
         ):
-            return asyncio.get_event_loop().run_until_complete(
+            return asyncio.run(
                 get_genome_metadata_node(base_state)
             )
 
@@ -221,7 +221,7 @@ class TestReconstructionResolverNode:
                 return_value=fallback_rv,
             ),
         ):
-            return asyncio.get_event_loop().run_until_complete(
+            return asyncio.run(
                 reconstruction_resolver_node(state)
             )
 
@@ -328,7 +328,7 @@ class TestGraphReconstructionRouting:
         from genome_agent.orchestrator_adapter import to_result
 
         orch = GenomeAgentLangGraphOrchestrator()
-        state = asyncio.get_event_loop().run_until_complete(
+        state = asyncio.run(
             orch.run(
                 user_question=f"Reconstruct the {species_name} genome.",
                 species_name=species_name,
