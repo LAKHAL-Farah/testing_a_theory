@@ -45,6 +45,9 @@ services:
     #   - "7687:7687"
     volumes:
       - neo4j_data:/data
+    ports:
+      - "7475:7474"
+      - "7688:7687"
     healthcheck:
       # Same substitution as above, for the same reason — one source of
       # truth for these credentials, not two hardcoded copies that can drift.
