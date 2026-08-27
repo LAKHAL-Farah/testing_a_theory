@@ -30,6 +30,15 @@ _logger = logging.getLogger(__name__)
 # request and refuses to override it, so "" is how we say "you decide".
 _INFER_SCOPE = ""
 
+# Fixed instruction the Reconstruction Agent expects for every handoff. The
+# LLM/keyword-fallback capability resolver still decides *which* agent to
+# target (need["target_agent"]) and produces a human-readable
+# prompt_to_target_agent for logging, but the wire instruction sent to the
+# Reconstruction Agent itself is this constant - the contract is on the
+# `context` payload (scientific_name/assembly_id/sequence_accession/
+# assembly_level/target_gaps), not on freeform instruction text.
+_RECONSTRUCTION_INSTRUCTION = "Reconstruct the selected unresolved regions."
+
 
 def resolve_species_name(request: AgentRequest) -> str:
     """The species to look up, preferring what the platform already established.
@@ -138,21 +147,52 @@ def to_result(state: GenomeAgentState) -> AgentResult:
     # Reconstruction handoff takes priority over the visualization handoff
     # below: get_genome_metadata_node (workflows/nodes/genome_data_nodes.py)
     # sets reconstruction_need whenever assembly_level is Scaffold/Contig,
-    # and _route_after_join_parallel routes to reconstruction_resolver
-    # instead of generate_visualization in that case - so visualization
-    # never even runs. Checking reconstruction_need first here keeps this
-    # function's precedence consistent with the graph's own routing.
+    # and _route_after_join_parallel routes to find_target_gaps ->
+    # reconstruction_resolver instead of generate_visualization in that case
+    # - so visualization never even runs. Checking reconstruction_need first
+    # here keeps this function's precedence consistent with the graph's own
+    # routing.
+    #
+    # This branch emits a *different* shape than every other branch in this
+    # function: the Reconstruction Agent's contract is
+    # {"instruction": str, "context": {...}} (see docs/genome_agent_integration.md
+    # §9a) with real gap coordinates and flanking sequence, not the generic
+    # `output` dict built above for the platform's own consumption. So the
+    # generic `output` dict is discarded here rather than reused - reusing
+    # it would ship `genome`/`genome_metadata`/etc. keys the Reconstruction
+    # Agent doesn't look for, instead of the `target_gaps`/`sequence_accession`
+    # keys it actually needs.
     need = state.reconstruction_need or {}
     if need.get("status") == "NEEDS_AGENT":
         _logger.info(
             "[Genome] assembly %s is incomplete — needs reconstruction agent",
             state.assembly_id,
         )
+        species = state.species or {}
+        scientific_name = (
+            species.get("scientific_name") or species.get("common_name") or state.species_name
+        )
+        metadata = state.metadata or {}
+        assembly_level = need.get("assembly_level") or metadata.get("assembly_level")
+
+        context: dict[str, Any] = {
+            "scientific_name": scientific_name,
+            "assembly_id": state.assembly_id,
+            "sequence_accession": state.sequence_accession,
+            "assembly_level": assembly_level,
+            "target_gaps": state.target_gaps or [],
+        }
+        if state.errors:
+            # e.g. find_target_gaps_node failed - surfaced as a warning
+            # rather than dropping the escalation, matching this module's
+            # general non-fatal error-handling stance.
+            context["warnings"] = list(state.errors)
+
         return AgentResult(
             status=AgentStatus.NEEDS_AGENT,
             target_agent=need.get("target_agent"),
-            prompt_to_target_agent=need.get("prompt_to_target_agent"),
-            output=output,
+            prompt_to_target_agent=_RECONSTRUCTION_INSTRUCTION,
+            output=context,
         )
 
     # Separate handoff: a *requested* protein_structure visualization that

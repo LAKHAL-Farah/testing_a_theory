@@ -1,13 +1,14 @@
 """
-Sequence Window — real NCBI Nuccore efetch subagent (new capability).
+Sequence Window — real NCBI Nuccore efetch subagent.
 Fetches a small DNA sequence window for a resolved assembly.
 
-Never cached — pass-through only, and not yet wired into the LangGraph
-orchestrator. It's a standalone, importable subagent for now; wiring it
-into build_genome_graph() (new state fields for seq_start/seq_stop, a
-new node, and a routing decision for when a query needs a sequence
-window rather than metadata/annotation) is a product decision left to
-whoever exposes this to users, not made here.
+Never cached — pass-through only. Wired into the LangGraph orchestrator via
+`subagents/gap_finder.py` / `workflows/nodes/gap_finder_node.py`, which call
+`fetch_sequence_window` to pull `left_flank`/`right_flank` sequence around
+each detected assembly gap ahead of the Reconstruction Agent handoff. It
+remains a standalone, importable subagent otherwise — nothing here assumes
+that caller; any other node needing an arbitrary sequence window can call it
+directly.
 
 Assembly accessions (e.g. "GCF_018350195.1") are NOT valid Nuccore IDs —
 Nuccore holds individual sequences (chromosomes, scaffolds, contigs),
