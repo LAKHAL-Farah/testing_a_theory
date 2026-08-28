@@ -36,7 +36,7 @@ from schemas.inputs import (  # noqa: E402
     ProteinDataInput,
 )
 from subagents.gene_mapper import gene_mapper_agent  # noqa: E402
-from subagents.literature_support import literature_support_agent  # noqa: E402
+from subagents.literature_support.mock import mock_literature_support  # noqa: E402
 from subagents.pathways.mock import mock_pathways_agent  # noqa: E402
 from subagents.protein_data.mock import mock_protein_data_agent  # noqa: E402
 
@@ -117,7 +117,7 @@ async def capture_literature_support(gene: str, trait_name: str) -> NodeCapture:
     # whatever the Literature Agent cross-agent call returned this run.
     cap = NodeCapture(node="literature_support", gene=gene, collection=None, query_text=trait_name)
     try:
-        out = await literature_support_agent(LiteratureSupportInput(
+        out = await mock_literature_support(LiteratureSupportInput(
             trait_name=trait_name, gene_list=[gene],
             instruction=f"Find literature support for {gene}", context={},
         ))

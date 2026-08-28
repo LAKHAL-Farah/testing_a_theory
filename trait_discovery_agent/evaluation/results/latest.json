@@ -1,0 +1,1190 @@
+[
+  {
+    "gene": "TP53",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },  
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['DNA damage response', 'apoptotic process', 'negative regulation of cell population proliferation']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/4 chunks match gene_symbol='TP53'; off-gene hits: ['e7eb88a3-c63a-fae8-443f-6ccad0a55388', '8c810fd1-c3ba-6fb1-2af2-7faadf72cbf8', '9a997dd7-e2bc-a1c7-fc62-717d97b5cc3a', '23911be9-f277-41f2-03b1-fcc2e9ac4d71']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "TP53",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['p53 signaling pathway']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='TP53'; off-gene hits: ['2a203d54-48e9-9b12-66c9-04ef4092b362', 'dce34215-c647-70ed-9049-c5700930de53', 'a949e59f-0f99-1d01-0e87-864c64e43506']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "TP53",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['tumor suppressor', 'transcription factor']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='TP53'; off-gene hits: ['ec88383b-c555-e7c9-9db0-e8a9b524ab9a', 'b1521863-d734-80c4-81b9-b5b0ae725f15', '34332fa4-ac95-e812-b11e-e166b62eb051']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "TP53",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 0,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    }
+  },
+  {
+    "gene": "BRCA1",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['DNA repair', 'double-strand break repair']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/4 chunks match gene_symbol='BRCA1'; off-gene hits: ['e7eb88a3-c63a-fae8-443f-6ccad0a55388', '8c810fd1-c3ba-6fb1-2af2-7faadf72cbf8', '23911be9-f277-41f2-03b1-fcc2e9ac4d71', '9a997dd7-e2bc-a1c7-fc62-717d97b5cc3a']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "BRCA1",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['Homologous recombination']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='BRCA1'; off-gene hits: ['2a203d54-48e9-9b12-66c9-04ef4092b362', 'dce34215-c647-70ed-9049-c5700930de53', 'a949e59f-0f99-1d01-0e87-864c64e43506']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "BRCA1",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['tumor suppressor', 'DNA repair']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='BRCA1'; off-gene hits: ['34332fa4-ac95-e812-b11e-e166b62eb051', 'b1521863-d734-80c4-81b9-b5b0ae725f15', 'ec88383b-c555-e7c9-9db0-e8a9b524ab9a']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "BRCA1",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 0,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    }
+  },
+  {
+    "gene": "UCP1",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.3333333333333333,
+      "detail": "missing: ['thermogenesis', 'brown fat cell differentiation']"
+    },
+    "context_precision": {
+      "score": 0.5,
+      "detail": "2/4 chunks match gene_symbol='UCP1'; off-gene hits: ['23911be9-f277-41f2-03b1-fcc2e9ac4d71', 'e7eb88a3-c63a-fae8-443f-6ccad0a55388']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "UCP1",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "all claims grounded in retrieved context"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "off-topic claims: ['Fatty acid degradation']"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['Thermogenesis']"
+    },
+    "context_precision": {
+      "score": 0.3333333333333333,
+      "detail": "1/3 chunks match gene_symbol='UCP1'; off-gene hits: ['2a203d54-48e9-9b12-66c9-04ef4092b362', 'dce34215-c647-70ed-9049-c5700930de53']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "UCP1",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "all claims grounded in retrieved context"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "off-topic claims: ['Mitochondrial proton channel, generates heat.']"
+    },
+    "context_recall": {
+      "score": 0.5,
+      "detail": "missing: ['proton channel']"
+    },
+    "context_precision": {
+      "score": 0.3333333333333333,
+      "detail": "1/3 chunks match gene_symbol='UCP1'; off-gene hits: ['b1521863-d734-80c4-81b9-b5b0ae725f15', 'ec88383b-c555-e7c9-9db0-e8a9b524ab9a']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "UCP1",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 1,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "all claims grounded in retrieved context"
+    },
+    "answer_relevancy": {
+      "score": 0.3333333333333333,
+      "detail": "answer stays on-topic for gene/trait"
+    }
+  },
+  {
+    "gene": "FGF5",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['hair follicle development', 'regulation of hair cycle']"
+    },
+    "context_precision": {
+      "score": 0.5,
+      "detail": "2/4 chunks match gene_symbol='FGF5'; off-gene hits: ['9a997dd7-e2bc-a1c7-fc62-717d97b5cc3a', '8c810fd1-c3ba-6fb1-2af2-7faadf72cbf8']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "FGF5",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "all claims grounded in retrieved context"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "off-topic claims: ['MAPK signaling pathway']"
+    },
+    "context_recall": {
+      "score": 1.0,
+      "detail": "all expected terms surfaced"
+    },
+    "context_precision": {
+      "score": 0.6666666666666666,
+      "detail": "2/3 chunks match gene_symbol='FGF5'; off-gene hits: ['a949e59f-0f99-1d01-0e87-864c64e43506']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "FGF5",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "all claims grounded in retrieved context"
+    },
+    "answer_relevancy": {
+      "score": 0.3333333333333333,
+      "detail": "answer stays on-topic for gene/trait"
+    },
+    "context_recall": {
+      "score": 0.5,
+      "detail": "missing: ['fibroblast growth factor']"
+    },
+    "context_precision": {
+      "score": 0.6666666666666666,
+      "detail": "2/3 chunks match gene_symbol='FGF5'; off-gene hits: ['34332fa4-ac95-e812-b11e-e166b62eb051']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "FGF5",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 2,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "all claims grounded in retrieved context"
+    },
+    "answer_relevancy": {
+      "score": 0.3333333333333333,
+      "detail": "answer stays on-topic for gene/trait"
+    }
+  },
+  {
+    "gene": "HR",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['hair cycle']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/4 chunks match gene_symbol='HR'; off-gene hits: ['9a997dd7-e2bc-a1c7-fc62-717d97b5cc3a', 'e7eb88a3-c63a-fae8-443f-6ccad0a55388', '23911be9-f277-41f2-03b1-fcc2e9ac4d71', '8c810fd1-c3ba-6fb1-2af2-7faadf72cbf8']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "HR",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 1.0,
+      "detail": "no expected terms recorded for this gene"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='HR'; off-gene hits: ['2a203d54-48e9-9b12-66c9-04ef4092b362', 'dce34215-c647-70ed-9049-c5700930de53', 'a949e59f-0f99-1d01-0e87-864c64e43506']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "HR",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['transcriptional corepressor']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='HR'; off-gene hits: ['ec88383b-c555-e7c9-9db0-e8a9b524ab9a', 'b1521863-d734-80c4-81b9-b5b0ae725f15', '34332fa4-ac95-e812-b11e-e166b62eb051']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "HR",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 0,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    }
+  },
+  {
+    "gene": "TRPV3",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['detection of temperature stimulus involved in sensory perception of pain', 'sensory perception of temperature stimulus']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/4 chunks match gene_symbol='TRPV3'; off-gene hits: ['8c810fd1-c3ba-6fb1-2af2-7faadf72cbf8', '23911be9-f277-41f2-03b1-fcc2e9ac4d71', 'e7eb88a3-c63a-fae8-443f-6ccad0a55388', '9a997dd7-e2bc-a1c7-fc62-717d97b5cc3a']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "TRPV3",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 1.0,
+      "detail": "no expected terms recorded for this gene"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='TRPV3'; off-gene hits: ['2a203d54-48e9-9b12-66c9-04ef4092b362', 'dce34215-c647-70ed-9049-c5700930de53', 'a949e59f-0f99-1d01-0e87-864c64e43506']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "TRPV3",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['thermosensitive', 'cation channel']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='TRPV3'; off-gene hits: ['34332fa4-ac95-e812-b11e-e166b62eb051', 'b1521863-d734-80c4-81b9-b5b0ae725f15', 'ec88383b-c555-e7c9-9db0-e8a9b524ab9a']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "TRPV3",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 0,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    }
+  },
+  {
+    "gene": "PRDM16",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['brown fat cell differentiation', 'positive regulation of transcription by RNA polymerase II']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/4 chunks match gene_symbol='PRDM16'; off-gene hits: ['8c810fd1-c3ba-6fb1-2af2-7faadf72cbf8', '9a997dd7-e2bc-a1c7-fc62-717d97b5cc3a', '23911be9-f277-41f2-03b1-fcc2e9ac4d71', 'e7eb88a3-c63a-fae8-443f-6ccad0a55388']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "PRDM16",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 0.0,
+      "detail": "unsupported claims: ['Thermogenesis']"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "off-topic claims: ['Thermogenesis']"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['Thermogenesis', 'PPAR signaling pathway']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='PRDM16'; off-gene hits: ['2a203d54-48e9-9b12-66c9-04ef4092b362', 'dce34215-c647-70ed-9049-c5700930de53', 'a949e59f-0f99-1d01-0e87-864c64e43506']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "PRDM16",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['transcription factor']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='PRDM16'; off-gene hits: ['34332fa4-ac95-e812-b11e-e166b62eb051', 'b1521863-d734-80c4-81b9-b5b0ae725f15', 'ec88383b-c555-e7c9-9db0-e8a9b524ab9a']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "PRDM16",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 1,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "all claims grounded in retrieved context"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "off-topic claims: ['UCP1 role in brown fat heat production.']"
+    }
+  },
+  {
+    "gene": "KRT71",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['hair cycle', 'keratinization']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/4 chunks match gene_symbol='KRT71'; off-gene hits: ['e7eb88a3-c63a-fae8-443f-6ccad0a55388', '23911be9-f277-41f2-03b1-fcc2e9ac4d71', '8c810fd1-c3ba-6fb1-2af2-7faadf72cbf8', '9a997dd7-e2bc-a1c7-fc62-717d97b5cc3a']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "KRT71",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 1.0,
+      "detail": "no expected terms recorded for this gene"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='KRT71'; off-gene hits: ['dce34215-c647-70ed-9049-c5700930de53', '2a203d54-48e9-9b12-66c9-04ef4092b362', 'a949e59f-0f99-1d01-0e87-864c64e43506']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "KRT71",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 0.0,
+      "detail": "unsupported claims: ['Structural protein of the hair shaft.']"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "off-topic claims: ['Structural protein of the hair shaft.']"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['keratin', 'hair shaft']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='KRT71'; off-gene hits: ['b1521863-d734-80c4-81b9-b5b0ae725f15', 'ec88383b-c555-e7c9-9db0-e8a9b524ab9a', '34332fa4-ac95-e812-b11e-e166b62eb051']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "KRT71",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 2,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "all claims grounded in retrieved context"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "off-topic claims: ['Links FGF5 mutation to hair length in mammals.', 'Broader gene network context around FGF5 signaling.']"
+    }
+  },
+  {
+    "gene": "MC1R",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['melanin biosynthetic process', 'G protein-coupled receptor signaling pathway']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/4 chunks match gene_symbol='MC1R'; off-gene hits: ['8c810fd1-c3ba-6fb1-2af2-7faadf72cbf8', 'e7eb88a3-c63a-fae8-443f-6ccad0a55388', '23911be9-f277-41f2-03b1-fcc2e9ac4d71', '9a997dd7-e2bc-a1c7-fc62-717d97b5cc3a']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "MC1R",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['Melanogenesis']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='MC1R'; off-gene hits: ['2a203d54-48e9-9b12-66c9-04ef4092b362', 'dce34215-c647-70ed-9049-c5700930de53', 'a949e59f-0f99-1d01-0e87-864c64e43506']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "MC1R",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['melanocortin', 'G-protein coupled receptor']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='MC1R'; off-gene hits: ['34332fa4-ac95-e812-b11e-e166b62eb051', 'b1521863-d734-80c4-81b9-b5b0ae725f15', 'ec88383b-c555-e7c9-9db0-e8a9b524ab9a']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "MC1R",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 0,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    }
+  },
+  {
+    "gene": "ASIP",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['melanin biosynthetic process', 'regulation of pigmentation']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/4 chunks match gene_symbol='ASIP'; off-gene hits: ['8c810fd1-c3ba-6fb1-2af2-7faadf72cbf8', '9a997dd7-e2bc-a1c7-fc62-717d97b5cc3a', '23911be9-f277-41f2-03b1-fcc2e9ac4d71', 'e7eb88a3-c63a-fae8-443f-6ccad0a55388']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "ASIP",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['Melanogenesis']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='ASIP'; off-gene hits: ['2a203d54-48e9-9b12-66c9-04ef4092b362', 'dce34215-c647-70ed-9049-c5700930de53', 'a949e59f-0f99-1d01-0e87-864c64e43506']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "ASIP",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['agouti', 'melanocortin']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='ASIP'; off-gene hits: ['b1521863-d734-80c4-81b9-b5b0ae725f15', 'ec88383b-c555-e7c9-9db0-e8a9b524ab9a', '34332fa4-ac95-e812-b11e-e166b62eb051']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "ASIP",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 0,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    }
+  },
+  {
+    "gene": "MARCH1",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['protein ubiquitination', 'regulation of MHC class II biosynthetic process']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/4 chunks match gene_symbol='MARCH1'; off-gene hits: ['e7eb88a3-c63a-fae8-443f-6ccad0a55388', '8c810fd1-c3ba-6fb1-2af2-7faadf72cbf8', '23911be9-f277-41f2-03b1-fcc2e9ac4d71', '9a997dd7-e2bc-a1c7-fc62-717d97b5cc3a']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "MARCH1",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 1.0,
+      "detail": "no expected terms recorded for this gene"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='MARCH1'; off-gene hits: ['2a203d54-48e9-9b12-66c9-04ef4092b362', 'dce34215-c647-70ed-9049-c5700930de53', 'a949e59f-0f99-1d01-0e87-864c64e43506']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "MARCH1",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['E3 ubiquitin', 'RING-CH']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='MARCH1'; off-gene hits: ['b1521863-d734-80c4-81b9-b5b0ae725f15', 'ec88383b-c555-e7c9-9db0-e8a9b524ab9a', '34332fa4-ac95-e812-b11e-e166b62eb051']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "MARCH1",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 0,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    }
+  },
+  {
+    "gene": "HRAS",
+    "node": "gene_mapper",
+    "collection": "go_annotations",
+    "error": null,
+    "num_chunks": 4,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.5,
+      "detail": "missing: ['Ras protein signal transduction']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/4 chunks match gene_symbol='HRAS'; off-gene hits: ['e7eb88a3-c63a-fae8-443f-6ccad0a55388', '9a997dd7-e2bc-a1c7-fc62-717d97b5cc3a', '23911be9-f277-41f2-03b1-fcc2e9ac4d71', '8c810fd1-c3ba-6fb1-2af2-7faadf72cbf8']"
+    },
+    "payload_contract": {
+      "total_chunks": 4,
+      "valid_chunks": 4,
+      "failures": []
+    }
+  },
+  {
+    "gene": "HRAS",
+    "node": "pathways",
+    "collection": "kegg_pathways",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.5,
+      "detail": "missing: ['Ras signaling pathway']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='HRAS'; off-gene hits: ['2a203d54-48e9-9b12-66c9-04ef4092b362', 'dce34215-c647-70ed-9049-c5700930de53', 'a949e59f-0f99-1d01-0e87-864c64e43506']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "HRAS",
+    "node": "protein_data",
+    "collection": "uniprot_proteins",
+    "error": null,
+    "num_chunks": 3,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    },
+    "context_recall": {
+      "score": 0.0,
+      "detail": "missing: ['GTPase', 'proto-oncogene']"
+    },
+    "context_precision": {
+      "score": 0.0,
+      "detail": "0/3 chunks match gene_symbol='HRAS'; off-gene hits: ['b1521863-d734-80c4-81b9-b5b0ae725f15', 'ec88383b-c555-e7c9-9db0-e8a9b524ab9a', '34332fa4-ac95-e812-b11e-e166b62eb051']"
+    },
+    "payload_contract": {
+      "total_chunks": 3,
+      "valid_chunks": 3,
+      "failures": []
+    }
+  },
+  {
+    "gene": "HRAS",
+    "node": "literature_support",
+    "collection": null,
+    "error": null,
+    "num_chunks": 0,
+    "faithfulness": {
+      "score": 1.0,
+      "detail": "no claims made, nothing to be unfaithful about"
+    },
+    "answer_relevancy": {
+      "score": 0.0,
+      "detail": "no answer produced"
+    }
+  }
+]
