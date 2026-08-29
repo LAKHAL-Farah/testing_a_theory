@@ -4,11 +4,24 @@ import os
 import random
 from functools import lru_cache
 
+from dotenv import load_dotenv
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
+
+# python-dotenv is already a declared dependency (requirements.txt) but was
+# never actually invoked anywhere in the codebase -- .env only got picked up
+# automatically under docker-compose (env_file:). A bare `python
+# evaluation/run_eval.py` (or any local, non-docker invocation) read nothing
+# from .env and silently fell back to whatever's already exported in the
+# shell -- or, worse, to DEFAULT_MODEL's hardcoded value below if nothing
+# was exported at all. Loading it here, at import time of the one module
+# every LLM call routes through, means every entry point gets it for free.
+# override=False: real environment variables (e.g. a CI secret) still win
+# over .env, matching docker-compose's own env_file semantics.
+load_dotenv(override=False)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = os.getenv("NIM_MODEL", "meta/llama-3.1-70b-instruct")
+DEFAULT_MODEL = os.getenv("NIM_MODEL", "nvidia/nemotron-3-super-120b-a12b")
 DEFAULT_BASE_URL = os.getenv("NIM_BASE_URL")
 FALLBACK_MODELS = (DEFAULT_MODEL,)
 

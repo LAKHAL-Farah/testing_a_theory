@@ -65,12 +65,12 @@ async def run_one_node(node: str, case: dict) -> dict[str, Any]:
     species_name = case.get("species_name", "")
 
     capture_fn = CAPTURE_FNS[node]
-    if node == "gene_mapper":
-        cap: NodeCapture = await capture_fn(gene, trait_name, species_name)
-    elif node == "literature_support":
-        cap = await capture_fn(gene, trait_name)
+    if node == "literature_support":
+        cap: NodeCapture = await capture_fn(gene, trait_name)
     else:
-        cap = await capture_fn(gene, trait_name)
+        # gene_mapper, pathways, protein_data all need species_name now to
+        # resolve a tax_id / KEGG org code for live UniProt+KEGG lookups.
+        cap = await capture_fn(gene, trait_name, species_name)
 
     result: dict[str, Any] = {
         "gene": gene, "node": node, "collection": cap.collection,

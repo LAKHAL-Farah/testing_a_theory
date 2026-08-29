@@ -18,6 +18,30 @@ so `capture_node` takes a small per-node adapter describing how to get the
 query text, which Qdrant collection (if any) to search, and how to turn the
 subagent's structured output into a flat list of "claims" for the RAGAS-style
 checks in rag_evaluators.py.
+
+--- live-KB identifier resolution (added) ---------------------------------
+gene_mapper_agent/pathways_agent/protein_data_agent are ID-based, not
+symbol-based: they expect a pre-resolved UniProt accession / KEGG gene id in
+`input.context`, never look one up themselves (see each subagent's
+`_select_*_for_gene`). protein_data_agent is the one exception -- it takes a
+bare NCBI taxonomy id and resolves the gene symbol itself via UniProt's
+`gene:{symbol} AND organism_id:{tax_id}` search.
+
+So for a *live* run (this file, not the mock-only path) we resolve those ids
+here, once per gene, before calling the real subagent:
+  - protein_data: species_name -> tax_id (SPECIES_TAX_ID), nothing else needed.
+  - gene_mapper:  needs a UniProt accession. We get it for free from the same
+    UniProt lookup used for protein_data (list_uniprot_candidates), so no
+    separate resolution step.
+  - pathways:     needs a KEGG gene id (e.g. "hsa:7157"). KEGG's `conv`
+    endpoint maps a UniProt accession straight to it, so we chain off the
+    same accession. See `_resolve_kegg_gene_id` below.
+
+None of this changes the subagents' own contracts (workflows/nodes/*.py
+still populate `context` the same way they always did) -- it's purely how
+this eval script fills in the same context dict for an offline gene list
+that doesn't come with pre-resolved ids attached, per the module docstring's
+"swap in the real ones" note.
 """
 from __future__ import annotations
 
@@ -26,9 +50,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
+import httpx
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kb.retrieval import RetrievedDocument, semantic_search  # noqa: E402
+from kb.sources.kegg_client import _assert_kegg_academic_use_only  # noqa: E402
+from kb.sources.uniprot_client import _list_uniprot_candidates_raw  # noqa: E402
 from schemas.inputs import (  # noqa: E402
     GeneMapperInput,
     LiteratureSupportInput,
@@ -37,8 +65,48 @@ from schemas.inputs import (  # noqa: E402
 )
 from subagents.gene_mapper import gene_mapper_agent  # noqa: E402
 from subagents.literature_support.mock import mock_literature_support  # noqa: E402
-from subagents.pathways.mock import mock_pathways_agent  # noqa: E402
-from subagents.protein_data.mock import mock_protein_data_agent  # noqa: E402
+from subagents.pathways import pathways_agent  # noqa: E402
+from subagents.protein_data import protein_data_agent  # noqa: E402
+
+# NCBI taxonomy id / KEGG organism code per species_name value used in
+# rag_test_cases.yaml. Add an entry here before adding a gene from a new
+# species to the eval set.
+SPECIES_TAX_ID: dict[str, int] = {
+    "Homo sapiens": 9606,
+    "Mus musculus": 10090,
+}
+SPECIES_KEGG_ORG: dict[str, str] = {
+    "Homo sapiens": "hsa",
+    "Mus musculus": "mmu",
+}
+
+KEGG_CONV_URL = "https://rest.kegg.jp/conv/{org}/uniprot:{accession}"
+
+
+async def _resolve_uniprot_accession(gene: str, tax_id: int) -> Optional[str]:
+    """First reviewed UniProt accession for gene+species, or None on zero hits.
+
+    Reuses the exact call protein_data_agent makes internally
+    (list_uniprot_candidates) so "does this gene resolve at all" is answered
+    the same way for both the protein_data context and as the upstream input
+    gene_mapper/pathways need.
+    """
+    candidates = await _list_uniprot_candidates_raw(gene, tax_id)
+    return candidates[0]["source_accession"] if candidates else None
+
+
+async def _resolve_kegg_gene_id(accession: str, org_code: str) -> Optional[str]:
+    """UniProt accession -> KEGG gene id (e.g. "hsa:7157") via KEGG's `conv`
+    endpoint. Returns None if KEGG has no entry for this accession."""
+    _assert_kegg_academic_use_only()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(KEGG_CONV_URL.format(org=org_code, accession=accession))
+        resp.raise_for_status()
+        line = resp.text.strip()
+        if not line or "\t" not in line:
+            return None
+        _source, kegg_gene_id = line.split("\t", 1)
+        return kegg_gene_id.strip() or None
 
 
 @dataclass
@@ -66,9 +134,22 @@ async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top
     cap = NodeCapture(node="gene_mapper", gene=gene, collection="go_annotations", query_text=query_text)
     try:
         cap.context_chunks = await _capture_context("go_annotations", query_text, top_k)
+
+        tax_id = SPECIES_TAX_ID.get(species_name)
+        accession = await _resolve_uniprot_accession(gene, tax_id) if tax_id else None
+        if accession is None:
+            # No reviewed UniProt entry to key off of -> QuickGO can't be
+            # queried either. Report it as gene_mapper's own unmatched case
+            # rather than silently returning an empty answer with status
+            # COMPLETED-looking metrics.
+            cap.raw_output = None
+            cap.answer_claims = []
+            return cap
+
         out = await gene_mapper_agent(GeneMapperInput(
             trait_name=trait_name, gene_list=[gene], species_name=species_name,
-            instruction=f"Map GO annotation for {gene}", context={},
+            instruction=f"Map GO annotation for {gene}",
+            context={"uniprot_accessions": {gene: accession}},
         ))
         cap.raw_output = out
         cap.answer_claims = [a.go_name for a in out.go_annotations if a.gene_symbol == gene]
@@ -77,17 +158,29 @@ async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top
     return cap
 
 
-async def capture_pathways(gene: str, trait_name: str, top_k: int = 5) -> NodeCapture:
+async def capture_pathways(gene: str, trait_name: str, species_name: str, top_k: int = 5) -> NodeCapture:
     query_text = f"{trait_name} {gene} pathway"
     cap = NodeCapture(node="pathways", gene=gene, collection="kegg_pathways", query_text=query_text)
     try:
         cap.context_chunks = await _capture_context("kegg_pathways", query_text, top_k)
-        # Real pathways_agent (subagents/pathways/__init__.py) hits the live KEGG API +
-        # LLM; the mock is used here so this stays runnable offline/in CI. Swap in the
-        # real subagent for a live-KB run of this eval.
-        out = await mock_pathways_agent(PathwaysInput(
+
+        tax_id = SPECIES_TAX_ID.get(species_name)
+        org_code = SPECIES_KEGG_ORG.get(species_name)
+        kegg_gene_id = None
+        if tax_id and org_code:
+            accession = await _resolve_uniprot_accession(gene, tax_id)
+            if accession:
+                kegg_gene_id = await _resolve_kegg_gene_id(accession, org_code)
+
+        if kegg_gene_id is None:
+            cap.raw_output = None
+            cap.answer_claims = []
+            return cap
+
+        out = await pathways_agent(PathwaysInput(
             gene_list=[gene], trait_name=trait_name,
-            instruction=f"Find pathway for {gene}", context={},
+            instruction=f"Find pathway for {gene}",
+            context={"kegg_gene_ids": {gene: kegg_gene_id}},
         ))
         cap.raw_output = out
         cap.answer_claims = [p.pathway_name for p in out.pathways]
@@ -96,14 +189,21 @@ async def capture_pathways(gene: str, trait_name: str, top_k: int = 5) -> NodeCa
     return cap
 
 
-async def capture_protein_data(gene: str, trait_name: str, top_k: int = 5) -> NodeCapture:
+async def capture_protein_data(gene: str, trait_name: str, species_name: str, top_k: int = 5) -> NodeCapture:
     query_text = f"{trait_name} {gene} protein function"
     cap = NodeCapture(node="protein_data", gene=gene, collection="uniprot_proteins", query_text=query_text)
     try:
         cap.context_chunks = await _capture_context("uniprot_proteins", query_text, top_k)
-        out = await mock_protein_data_agent(ProteinDataInput(
+
+        tax_id = SPECIES_TAX_ID.get(species_name)
+        if tax_id is None:
+            cap.error = f"no tax_id mapping for species_name={species_name!r}"
+            return cap
+
+        out = await protein_data_agent(ProteinDataInput(
             gene_list=[gene], trait_name=trait_name,
-            instruction=f"Find protein function for {gene}", context={},
+            instruction=f"Find protein function for {gene}",
+            context={"tax_id": tax_id},
         ))
         cap.raw_output = out
         cap.answer_claims = [p.function_summary for p in out.proteins]
