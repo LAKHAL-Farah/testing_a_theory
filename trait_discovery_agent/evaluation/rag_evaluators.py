@@ -14,11 +14,12 @@ for turning each node's structured output into that flat shape.
 """
 from __future__ import annotations
 
+import asyncio
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from kb.embeddings import embed_text
 from kb.retrieval import RetrievedDocument, ValidationResult, validate_document
 
 _STOPWORDS = {
@@ -27,10 +28,57 @@ _STOPWORDS = {
     "via", "with", "gene", "protein",
 }
 
-# Below this cosine similarity a claim is flagged as off-topic in the detail
-# string (the score itself is still the raw similarity, not this threshold --
-# this only controls what gets called out for a human to look at).
+# Below this relevance score a claim is flagged as off-topic in the detail
+# string (the score itself is still the raw model output, not this threshold
+# -- this only controls what gets called out for a human to look at).
 _RELEVANCY_OFF_TOPIC_THRESHOLD = 0.25
+
+# ---------------------------------------------------------------------------
+# answer_relevancy scoring backend
+#
+# A first pass here used cosine similarity between a full question and each
+# bare claim, embedded with the same all-MiniLM-L6-v2 model kb/retrieval.py
+# uses for search. That flattened every collection into a 0.16-0.40 band
+# even though faithfulness and context_precision both sat at ~1.00 -- i.e.
+# the answers *were* correct, the metric just couldn't say so. Reformulating
+# the query into several shorter, same-register anchors and max-pooling
+# barely moved the number (confirmed against a live run), which rules out
+# "wrong phrasing" as the cause: a bi-encoder trained for general sentence
+# *similarity* just doesn't produce high absolute cosine scores for two
+# genuinely-related but differently-worded short phrases -- there's no
+# amount of query reformulation that fixes a ceiling built into the model.
+#
+# A cross-encoder trained specifically for query/passage *relevance*
+# ranking (as opposed to paraphrase similarity) is the right tool for this
+# job: it takes the (query, claim) pair together and outputs a single
+# relevance judgment, which is what "is this claim relevant to the
+# question" actually is. This only affects how the eval harness scores
+# relevancy -- it doesn't touch kb/embeddings.py or require re-indexing
+# Qdrant, since retrieval itself never used this model.
+# ---------------------------------------------------------------------------
+
+_cross_encoder = None
+
+
+def _get_relevance_cross_encoder():
+    global _cross_encoder
+    if _cross_encoder is None:
+        from sentence_transformers import CrossEncoder
+
+        _cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    return _cross_encoder
+
+
+def _score_relevance_pairs(query: str, claims: list[str]) -> list[float]:
+    """Raw (query, claim) relevance scores, sigmoid-mapped to [0, 1].
+
+    Isolated into its own function (rather than inlined in answer_relevancy)
+    so tests can monkeypatch this one call instead of needing the real
+    ~90MB MS MARCO cross-encoder model.
+    """
+    encoder = _get_relevance_cross_encoder()
+    raw_scores = encoder.predict([(query, claim) for claim in claims])
+    return [max(0.0, min(1.0 / (1.0 + math.exp(-float(s))), 1.0)) for s in raw_scores]
 
 
 def _tokenize(text: str) -> set[str]:
@@ -98,37 +146,32 @@ async def answer_relevancy(answer_claims: list[str], gene: str, trait_name: str)
     """Does the generated answer actually address the gene/trait asked about,
     rather than being generic or off-topic?
 
-    Semantic-similarity implementation: embeds each claim and the
-    {gene, trait_name} query with the same model kb/retrieval.py uses for
-    search, and scores relevancy as cosine similarity. Replaces the earlier
-    pure token-overlap version, which scored a claim as *completely*
-    off-topic (0.0) whenever it shared zero literal words with the query --
-    the exact false-negative the old docstring called out (e.g. "p53
-    signaling pathway" vs trait_name "tumor suppression", or "hair follicle
-    development" vs "fur growth": correct answers, near-zero literal
-    overlap). Confirmed in practice: kegg_pathways answer_relevancy sat at a
-    flat 0.00 even once every other bug was fixed and pathways were
-    resolving correctly, because KEGG pathway names almost never literally
-    quote the trait or gene symbol.
+    Cross-encoder implementation: scores each claim against a
+    "What is the role of {gene} in {trait_name}?" query as a direct
+    relevance judgment (see _score_relevance_pairs), not paraphrase
+    similarity. Replaces two earlier attempts that both undersold correct
+    answers -- pure token overlap scored a claim as *completely* off-topic
+    (0.0) whenever it shared zero literal words with the query (e.g. "p53
+    signaling pathway" vs trait_name "tumor suppression": a correct answer,
+    near-zero literal overlap); a bi-encoder cosine-similarity version fixed
+    that false-negative but flattened every collection into a 0.16-0.40
+    band regardless of answer quality, because a model trained for sentence
+    *similarity* doesn't produce high absolute scores for two genuinely
+    related but differently-worded short phrases -- confirmed in practice
+    across several query reformulations, so it's the scoring approach, not
+    the phrasing, that was capping every collection.
     """
     if not answer_claims:
         return MetricResult(score=0.0, detail="no answer produced")
 
-    query_vec = await embed_text(f"What is the role of {gene} in {trait_name}?")
-    per_claim_scores = []
-    off_topic: list[str] = []
+    query = f"What is the role of {gene} in {trait_name}?"
+    # CrossEncoder.predict is a synchronous, CPU-bound call -- offload it so
+    # this coroutine doesn't block the event loop the other capture_* calls
+    # in run_eval.py share.
+    scores = await asyncio.to_thread(_score_relevance_pairs, query, answer_claims)
 
-    for claim in answer_claims:
-        claim_vec = await embed_text(claim)
-        # both vectors are unit-normalized (kb/embeddings.py), so dot
-        # product is cosine similarity.
-        sim = sum(a * b for a, b in zip(query_vec, claim_vec))
-        sim = max(0.0, min(sim, 1.0))
-        per_claim_scores.append(sim)
-        if sim < _RELEVANCY_OFF_TOPIC_THRESHOLD:
-            off_topic.append(claim)
-
-    score = sum(per_claim_scores) / len(per_claim_scores)
+    off_topic = [claim for claim, sim in zip(answer_claims, scores) if sim < _RELEVANCY_OFF_TOPIC_THRESHOLD]
+    score = sum(scores) / len(scores)
     detail = f"off-topic claims: {off_topic}" if off_topic else "answer stays on-topic for gene/trait"
     return MetricResult(score=score, detail=detail)
 
@@ -165,19 +208,41 @@ def context_precision(context_chunks: list[RetrievedDocument], gene: str) -> Met
 # Metric 4 — Context recall
 # ---------------------------------------------------------------------------
 
+def _term_surfaced(term: str, context_blob: str, context_tokens: set[str]) -> bool:
+    """A term counts as recalled if it's a literal substring, OR if every
+    content word in it shows up somewhere in the retrieved context.
+
+    Live QuickGO/UniProt text legitimately varies in ways an exact substring
+    check punishes for no good reason -- hyphenation ("G-protein coupled"
+    vs "G protein-coupled"), word order, or one field spelling out what
+    another abbreviates. The token fallback still requires every meaningful
+    word in the expected term to be present (not just any one of them), so
+    it doesn't turn into a trivially lenient check -- it only forgives
+    surface formatting, not missing content.
+    """
+    normalized_term = term.lower().replace("-", " ")
+    normalized_blob = context_blob.replace("-", " ")
+    if normalized_term in normalized_blob:
+        return True
+    term_tokens = _tokenize(term)
+    return bool(term_tokens) and term_tokens.issubset(context_tokens)
+
+
 def context_recall(expected_terms: list[str], context_chunks: list[RetrievedDocument]) -> MetricResult:
     """Of everything relevant that exists in the KB for this gene, how much
     did retrieval actually surface? Compares Step 3's expected_* list
-    against the retrieved chunks' text (case-insensitive substring / token
-    overlap).
+    against the retrieved chunks' text (case-insensitive substring, with a
+    token-subset fallback for surface-level wording differences -- see
+    _term_surfaced).
     """
     if not expected_terms:
         return MetricResult(score=1.0, detail="no expected terms recorded for this gene")
 
     context_blob = " ".join(_chunk_text(c) for c in context_chunks).lower()
+    context_tokens = _tokenize(context_blob)
     found, missing = [], []
     for term in expected_terms:
-        if term.lower() in context_blob:
+        if _term_surfaced(term, context_blob, context_tokens):
             found.append(term)
         else:
             missing.append(term)

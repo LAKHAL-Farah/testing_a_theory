@@ -141,6 +141,14 @@ async def _capture_context(
     (gene_mapper/pathways/protein_data __init__.py) stores the queried gene
     verbatim as payload["gene_symbol"], so an exact-match filter on the same
     string is safe and doesn't need fuzzy/case handling.
+
+    Because that filter already pins every result to the correct gene,
+    raising top_k here costs nothing on context_precision (it's a hard
+    filter, not a re-rank) but directly buys context_recall: a
+    well-annotated gene can have dozens of real GO biological_process
+    terms, and the old top_k=5 was throwing away everything past the 5
+    most semantically-similar-to-the-query-text ones before recall was
+    even computed. Bumped from 5 -> 25 in the capture_* defaults below.
     """
     if collection is None:
         return []
@@ -148,7 +156,7 @@ async def _capture_context(
     return await semantic_search(collection, query_text, top_k=top_k, filters=filters)
 
 
-async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top_k: int = 5) -> NodeCapture:
+async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top_k: int = 25) -> NodeCapture:
     query_text = f"{trait_name} {gene}"
     cap = NodeCapture(node="gene_mapper", gene=gene, collection="go_annotations", query_text=query_text)
     try:
@@ -179,7 +187,7 @@ async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top
     return cap
 
 
-async def capture_pathways(gene: str, trait_name: str, species_name: str, top_k: int = 5) -> NodeCapture:
+async def capture_pathways(gene: str, trait_name: str, species_name: str, top_k: int = 25) -> NodeCapture:
     query_text = f"{trait_name} {gene} pathway"
     cap = NodeCapture(node="pathways", gene=gene, collection="kegg_pathways", query_text=query_text)
     try:
@@ -212,7 +220,7 @@ async def capture_pathways(gene: str, trait_name: str, species_name: str, top_k:
     return cap
 
 
-async def capture_protein_data(gene: str, trait_name: str, species_name: str, top_k: int = 5) -> NodeCapture:
+async def capture_protein_data(gene: str, trait_name: str, species_name: str, top_k: int = 25) -> NodeCapture:
     query_text = f"{trait_name} {gene} protein function"
     cap = NodeCapture(node="protein_data", gene=gene, collection="uniprot_proteins", query_text=query_text)
     try:

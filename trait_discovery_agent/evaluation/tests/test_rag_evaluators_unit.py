@@ -5,14 +5,14 @@ functions themselves are correct before trusting a live scorecard, and (b)
 cover Step 6.2 of the guide directly: a malformed/incomplete payload must
 fail loudly via validate_document(), not be silently treated as complete.
 
-answer_relevancy is embedding-based (see rag_evaluators.py), so these tests
-monkeypatch rag_evaluators.embed_text with a tiny deterministic bag-of-words
-embedder instead of loading the real sentence-transformers model -- keeps
-this suite fast and dependency-free while still exercising the real cosine-
-similarity code path (not just re-testing token overlap under a new name).
+answer_relevancy is cross-encoder-based (see rag_evaluators.py), so these
+tests monkeypatch rag_evaluators._score_relevance_pairs with a tiny
+deterministic bag-of-words scorer instead of loading the real ~90MB MS
+MARCO model -- keeps this suite fast and dependency-free while still
+exercising the real per-claim scoring/off-topic-flagging code path (not
+just re-testing token overlap under a new name).
 """
 import asyncio
-import math
 import sys
 from pathlib import Path
 
@@ -31,29 +31,27 @@ from rag_evaluators import (  # noqa: E402
     payload_contract,
 )
 
+# Small fixed vocabulary shared by all relevancy test cases below -- enough
+# to make "shares a concept with the query" score high and "shares nothing"
+# score exactly 0, without pulling in the real cross-encoder model.
+_FAKE_RELEVANCE_VOCAB = {
+    "response", "cold", "hallmark", "adaptation", "caffeine",
+    "metabolism", "pathway", "unrelated",
+}
 
-def _fake_embed_vocab(text: str) -> dict[str, int]:
-    return {w: 1 for w in rag_evaluators._tokenize(text)}
 
-
-async def _fake_embed_text(text: str) -> list[float]:
-    """Deterministic unit-normalized bag-of-words vector over a small fixed
-    vocabulary shared by all test cases below -- enough to make "shares a
-    concept" score high and "shares nothing" score ~0, without pulling in
-    a real embedding model."""
-    vocab = sorted({
-        "response", "cold", "hallmark", "adaptation", "caffeine",
-        "metabolism", "pathway", "unrelated",
-    })
-    bag = _fake_embed_vocab(text)
-    vec = [1.0 if w in bag else 0.0 for w in vocab]
-    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-    return [v / norm for v in vec]
+def _fake_score_relevance_pairs(query: str, claims: list[str]) -> list[float]:
+    query_tokens = rag_evaluators._tokenize(query) & _FAKE_RELEVANCE_VOCAB
+    scores = []
+    for claim in claims:
+        claim_tokens = rag_evaluators._tokenize(claim) & _FAKE_RELEVANCE_VOCAB
+        scores.append(1.0 if (query_tokens & claim_tokens) else 0.0)
+    return scores
 
 
 @pytest.fixture(autouse=True)
-def _patch_embeddings(monkeypatch):
-    monkeypatch.setattr(rag_evaluators, "embed_text", _fake_embed_text)
+def _patch_relevance_scorer(monkeypatch):
+    monkeypatch.setattr(rag_evaluators, "_score_relevance_pairs", _fake_score_relevance_pairs)
 
 
 def _doc(id_: str, gene_symbol: str, **extra) -> RetrievedDocument:

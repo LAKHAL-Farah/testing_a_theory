@@ -20,6 +20,7 @@ attributes actually changes what gene_mapper_agent() calls.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -143,6 +144,42 @@ async def gene_mapper_agent(input: GeneMapperInput) -> GeneMapperOutput:
             },
         )
         annotations.append(entry)
+
+        # ---- KB enrichment: ingest every other real QuickGO candidate too,
+        # not just the one the LLM picked as the answer for *this* trait
+        # (§ retrieval-quality fix). Without this, the Qdrant go_annotations
+        # collection only ever accumulates one GO term per gene no matter
+        # how many biological-process annotations that gene genuinely has,
+        # which structurally caps context_recall well below what real
+        # retrieval quality would support whenever a gene has more than one
+        # true GO term. The winner above is still the only thing returned
+        # in this call's answer -- this only widens what's indexed for
+        # future retrieval/evaluation.
+        if len(candidates) > 1:
+            others = [c for c in candidates if c["go_id"] != entry.go_id]
+            other_names = await asyncio.gather(
+                *(resolve_go_term_name(c["go_id"]) for c in others),
+                return_exceptions=True,
+            )
+            for candidate, name in zip(others, other_names):
+                if not isinstance(name, str) or not name:
+                    continue
+                cand_key = f"go:{candidate['go_id']}:{gene}"
+                if await get_cached("go_annotations", cand_key):
+                    continue
+                await upsert_point(
+                    "go_annotations",
+                    cand_key,
+                    text_to_embed=name,
+                    payload={
+                        "gene_symbol": gene,
+                        "go_id": candidate["go_id"],
+                        "go_name": name,
+                        "source": "GO REST API (QuickGO)",
+                        "ingested_at": datetime.now(timezone.utc).isoformat(),
+                        "schema_version": SCHEMA_VERSION,
+                    },
+                )
 
     # §9: FAILED if no annotations resolved OR any gene is unmatched
     status = AgentStatus.FAILED if (not annotations or unmatched) else AgentStatus.COMPLETED

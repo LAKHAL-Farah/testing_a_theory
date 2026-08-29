@@ -49,6 +49,39 @@ class _NoReviewedHits(Exception):
     (§9: worth retrying via the deterministic fallback)."""
 
 
+async def _enrich_other_protein_candidates(
+    gene: str, tax_id: int, candidates: list[dict], picked_accession: str
+) -> None:
+    """Ingest every other reviewed UniProt hit for this gene+species besides
+    the one being returned as this call's answer. Unlike gene_mapper/
+    pathways, no extra network round-trip is needed here -- list_uniprot_
+    candidates already returns full protein_name/function_summary for every
+    candidate, not just IDs -- so this is purely widening what gets indexed
+    from data we already fetched."""
+    others = [c for c in candidates if c["source_accession"] != picked_accession]
+    for c in others:
+        if not c.get("function_summary"):
+            continue
+        cand_key = f"uniprot:{c['source_accession']}:{tax_id}"
+        if await get_cached("uniprot_proteins", cand_key):
+            continue
+        await upsert_point(
+            "uniprot_proteins",
+            cand_key,
+            text_to_embed=c["function_summary"],
+            payload={
+                "gene_symbol": gene,
+                "protein_name": c["protein_name"],
+                "function_summary": c["function_summary"],
+                "species_tax_id": tax_id,
+                "source": "UniProt REST API",
+                "source_accession": c["source_accession"],
+                "ingested_at": datetime.now(timezone.utc).isoformat(),
+                "schema_version": SCHEMA_VERSION,
+            },
+        )
+
+
 async def _select_protein_for_gene(
     gene: str, tax_id: int, trait_name: str
 ) -> ProteinEntry | None:
@@ -88,6 +121,12 @@ async def _select_protein_for_gene(
         logger.info(
             "LLM picked %s (%s) for %s: %s", accession, protein_name, gene, reasoning
         )
+        # ---- KB enrichment: index every other reviewed hit too (see
+        # gene_mapper_agent/pathways_agent for the same fix + rationale) ----
+        try:
+            await _enrich_other_protein_candidates(gene, tax_id, candidates, accession)
+        except Exception as enrich_exc:
+            logger.warning("protein KB enrichment failed for %s: %s", gene, enrich_exc)
         return ProteinEntry(
             gene_symbol=gene,
             protein_name=protein_name,
