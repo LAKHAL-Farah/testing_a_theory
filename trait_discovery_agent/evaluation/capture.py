@@ -121,19 +121,38 @@ class NodeCapture:
     answer_claims: list[str] = field(default_factory=list)
     raw_output: Any = None
     error: Optional[str] = None
+    # True when zero claims is a genuine "nothing to report" outcome (no
+    # UniProt/KEGG id to resolve, zero reviewed hits, etc.) rather than the
+    # answer being off-topic. Keeps answer_relevancy from being penalized for
+    # a coverage gap it wasn't designed to measure -- see run_eval.py.
+    unresolved: bool = False
 
 
-async def _capture_context(collection: Optional[str], query_text: str, top_k: int) -> list[RetrievedDocument]:
+async def _capture_context(
+    collection: Optional[str], query_text: str, top_k: int, gene: Optional[str] = None
+) -> list[RetrievedDocument]:
+    """Semantic search, scoped to the gene under evaluation when one is given.
+
+    Without this filter, `query_text` (just "{trait_name} {gene}") is the
+    *only* thing keeping results on-topic, and it isn't a reliable enough
+    embedding signal to beat cross-gene collisions -- exactly the cases
+    rag_test_cases.yaml deliberately includes (HR vs HRAS, MARCH1 vs the
+    calendar month, ASIP vs its "Agouti" synonym). Every writer
+    (gene_mapper/pathways/protein_data __init__.py) stores the queried gene
+    verbatim as payload["gene_symbol"], so an exact-match filter on the same
+    string is safe and doesn't need fuzzy/case handling.
+    """
     if collection is None:
         return []
-    return await semantic_search(collection, query_text, top_k=top_k)
+    filters = {"gene_symbol": gene} if gene else None
+    return await semantic_search(collection, query_text, top_k=top_k, filters=filters)
 
 
 async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top_k: int = 5) -> NodeCapture:
     query_text = f"{trait_name} {gene}"
     cap = NodeCapture(node="gene_mapper", gene=gene, collection="go_annotations", query_text=query_text)
     try:
-        cap.context_chunks = await _capture_context("go_annotations", query_text, top_k)
+        cap.context_chunks = await _capture_context("go_annotations", query_text, top_k, gene=gene)
 
         tax_id = SPECIES_TAX_ID.get(species_name)
         accession = await _resolve_uniprot_accession(gene, tax_id) if tax_id else None
@@ -144,6 +163,7 @@ async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top
             # COMPLETED-looking metrics.
             cap.raw_output = None
             cap.answer_claims = []
+            cap.unresolved = True
             return cap
 
         out = await gene_mapper_agent(GeneMapperInput(
@@ -153,6 +173,7 @@ async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top
         ))
         cap.raw_output = out
         cap.answer_claims = [a.go_name for a in out.go_annotations if a.gene_symbol == gene]
+        cap.unresolved = not cap.answer_claims
     except Exception as exc:  # pragma: no cover - live-dependency failures surface as eval findings
         cap.error = f"{type(exc).__name__}: {exc}"
     return cap
@@ -162,7 +183,7 @@ async def capture_pathways(gene: str, trait_name: str, species_name: str, top_k:
     query_text = f"{trait_name} {gene} pathway"
     cap = NodeCapture(node="pathways", gene=gene, collection="kegg_pathways", query_text=query_text)
     try:
-        cap.context_chunks = await _capture_context("kegg_pathways", query_text, top_k)
+        cap.context_chunks = await _capture_context("kegg_pathways", query_text, top_k, gene=gene)
 
         tax_id = SPECIES_TAX_ID.get(species_name)
         org_code = SPECIES_KEGG_ORG.get(species_name)
@@ -175,6 +196,7 @@ async def capture_pathways(gene: str, trait_name: str, species_name: str, top_k:
         if kegg_gene_id is None:
             cap.raw_output = None
             cap.answer_claims = []
+            cap.unresolved = True
             return cap
 
         out = await pathways_agent(PathwaysInput(
@@ -184,6 +206,7 @@ async def capture_pathways(gene: str, trait_name: str, species_name: str, top_k:
         ))
         cap.raw_output = out
         cap.answer_claims = [p.pathway_name for p in out.pathways]
+        cap.unresolved = not cap.answer_claims
     except Exception as exc:  # pragma: no cover
         cap.error = f"{type(exc).__name__}: {exc}"
     return cap
@@ -193,7 +216,7 @@ async def capture_protein_data(gene: str, trait_name: str, species_name: str, to
     query_text = f"{trait_name} {gene} protein function"
     cap = NodeCapture(node="protein_data", gene=gene, collection="uniprot_proteins", query_text=query_text)
     try:
-        cap.context_chunks = await _capture_context("uniprot_proteins", query_text, top_k)
+        cap.context_chunks = await _capture_context("uniprot_proteins", query_text, top_k, gene=gene)
 
         tax_id = SPECIES_TAX_ID.get(species_name)
         if tax_id is None:
@@ -207,6 +230,12 @@ async def capture_protein_data(gene: str, trait_name: str, species_name: str, to
         ))
         cap.raw_output = out
         cap.answer_claims = [p.function_summary for p in out.proteins]
+        # protein_data_agent degrades zero-hit genes into missing_genes
+        # rather than raising (see subagents/protein_data/__init__.py), so a
+        # gene landing there is a genuine "no reviewed entry", same
+        # coverage-gap shape as the gene_mapper/pathways unresolved case
+        # above -- not an off-topic answer.
+        cap.unresolved = not cap.answer_claims and gene in (out.missing_genes or [])
     except Exception as exc:  # pragma: no cover
         cap.error = f"{type(exc).__name__}: {exc}"
     return cap

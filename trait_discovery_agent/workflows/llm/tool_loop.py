@@ -20,8 +20,15 @@ logger = logging.getLogger(__name__)
 
 # Hard ceiling on tool-call/tool-result round-trips inside a single bind_tools
 # decision, so a model that keeps calling tools instead of answering can't spin
-# forever. One real decision (§0.1 of the guide) should resolve in 1-2 turns.
-MAX_TOOL_TURNS = 6
+# forever. One real decision (§0.1 of the guide) should resolve in 1-2 turns,
+# but hosted NIM models occasionally need an extra round-trip or two under
+# real latency/load (see the ~60s silent-poll note below) even with the
+# repeated-identical-call guard in the loop -- observed on BRCA1 despite that
+# guard, i.e. not every turn-exhaustion case is a repeated call. 8 gives that
+# headroom without meaningfully raising the cost of a model that's genuinely
+# stuck (the deterministic fallback in each subagent still catches that case
+# either way).
+MAX_TOOL_TURNS = 8
 
 
 def _coerce_stringified_json_args(args: dict) -> dict:
@@ -234,6 +241,44 @@ async def invoke_tool_loop_with_fallback(
                             "Coerced stringified-JSON args for %s: %r -> %r",
                             call["name"], call["args"], call_args,
                         )
+                    # A model that calls the same (name, args) pair it already
+                    # called earlier in this loop learns nothing new from
+                    # re-running it -- these tools are deterministic reads
+                    # (re-fetch the same candidate list), so a repeat is a
+                    # model that's stuck, not one gathering information. Left
+                    # unchecked this is exactly what burns through
+                    # MAX_TOOL_TURNS without ever reaching a final answer
+                    # (observed on MC1R/HRAS). Reuse the earlier result and
+                    # tell it plainly instead of re-invoking and hoping the
+                    # next turn is different.
+                    repeat = next(
+                        (
+                            logged for logged in tool_call_log
+                            if logged["name"] == call["name"] and logged["args"] == call_args
+                        ),
+                        None,
+                    )
+                    if repeat is not None:
+                        logger.warning(
+                            "Model repeated an identical tool call %s(%s); reusing "
+                            "the earlier result instead of re-invoking, and telling "
+                            "it plainly to stop calling and answer.",
+                            call["name"], call_args,
+                        )
+                        result = repeat["result"]
+                        convo.append(
+                            ToolMessage(
+                                content=(
+                                    json.dumps(result, default=str)
+                                    + " (note: identical to your earlier call -- this "
+                                    "won't return anything new. You already have "
+                                    "everything you need; reply with ONLY the final "
+                                    "JSON object now.)"
+                                ),
+                                tool_call_id=call["id"],
+                            )
+                        )
+                        continue
                     result = await tool.ainvoke(call_args)
                     tool_call_log.append(
                         {"name": call["name"], "args": call_args, "result": result}
@@ -247,7 +292,8 @@ async def invoke_tool_loop_with_fallback(
                 turn += 1
 
             raise RuntimeError(
-                f"Tool-calling loop exceeded {turns_limit} turns without a final answer"
+                f"Tool-calling loop exceeded {turns_limit} turns without a final answer "
+                f"(calls made: {[(c['name'], c['args']) for c in tool_call_log]!r})"
             )
         except Exception as exc:
             last_error = exc

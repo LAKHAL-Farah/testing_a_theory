@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from kb.embeddings import embed_text
 from kb.retrieval import RetrievedDocument, ValidationResult, validate_document
 
 _STOPWORDS = {
@@ -25,6 +26,11 @@ _STOPWORDS = {
     "in", "into", "is", "it", "its", "of", "on", "or", "that", "the", "to",
     "via", "with", "gene", "protein",
 }
+
+# Below this cosine similarity a claim is flagged as off-topic in the detail
+# string (the score itself is still the raw similarity, not this threshold --
+# this only controls what gets called out for a human to look at).
+_RELEVANCY_OFF_TOPIC_THRESHOLD = 0.25
 
 
 def _tokenize(text: str) -> set[str]:
@@ -88,37 +94,38 @@ def faithfulness(answer_claims: list[str], context_chunks: list[RetrievedDocumen
 # Metric 2 — Answer relevancy
 # ---------------------------------------------------------------------------
 
-def answer_relevancy(answer_claims: list[str], gene: str, trait_name: str) -> MetricResult:
+async def answer_relevancy(answer_claims: list[str], gene: str, trait_name: str) -> MetricResult:
     """Does the generated answer actually address the gene/trait asked about,
     rather than being generic or off-topic?
 
-    First-pass implementation: token overlap between each claim and the
-    {gene, trait_name} query. Catches the guide's example -- a pathways
-    answer that talks about an unrelated pathway because a poor embedding
-    match pulled in the wrong KEGG chunk.
-
-    Known limitation of pure token overlap: a claim can be genuinely on-topic
-    while sharing zero literal words with the trait_name (e.g. claim "hair
-    follicle development" vs trait_name "fur growth" -- true positive that
-    this function will score as 0 and flag as off-topic). Treat a low score
-    here as "investigate", not as ground truth, until this is swapped for an
-    embedding-based or ragas relevancy check.
+    Semantic-similarity implementation: embeds each claim and the
+    {gene, trait_name} query with the same model kb/retrieval.py uses for
+    search, and scores relevancy as cosine similarity. Replaces the earlier
+    pure token-overlap version, which scored a claim as *completely*
+    off-topic (0.0) whenever it shared zero literal words with the query --
+    the exact false-negative the old docstring called out (e.g. "p53
+    signaling pathway" vs trait_name "tumor suppression", or "hair follicle
+    development" vs "fur growth": correct answers, near-zero literal
+    overlap). Confirmed in practice: kegg_pathways answer_relevancy sat at a
+    flat 0.00 even once every other bug was fixed and pathways were
+    resolving correctly, because KEGG pathway names almost never literally
+    quote the trait or gene symbol.
     """
     if not answer_claims:
         return MetricResult(score=0.0, detail="no answer produced")
 
-    query_tokens = _tokenize(f"{gene} {trait_name}")
+    query_vec = await embed_text(f"What is the role of {gene} in {trait_name}?")
     per_claim_scores = []
     off_topic: list[str] = []
 
     for claim in answer_claims:
-        claim_tokens = _tokenize(claim)
-        if not claim_tokens or not query_tokens:
-            per_claim_scores.append(0.0)
-            continue
-        overlap = len(claim_tokens & query_tokens) / len(query_tokens)
-        per_claim_scores.append(min(overlap, 1.0))
-        if overlap == 0:
+        claim_vec = await embed_text(claim)
+        # both vectors are unit-normalized (kb/embeddings.py), so dot
+        # product is cosine similarity.
+        sim = sum(a * b for a, b in zip(query_vec, claim_vec))
+        sim = max(0.0, min(sim, 1.0))
+        per_claim_scores.append(sim)
+        if sim < _RELEVANCY_OFF_TOPIC_THRESHOLD:
             off_topic.append(claim)
 
     score = sum(per_claim_scores) / len(per_claim_scores)

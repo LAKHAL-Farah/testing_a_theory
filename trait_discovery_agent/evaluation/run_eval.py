@@ -75,13 +75,21 @@ async def run_one_node(node: str, case: dict) -> dict[str, Any]:
     result: dict[str, Any] = {
         "gene": gene, "node": node, "collection": cap.collection,
         "error": cap.error, "num_chunks": len(cap.context_chunks),
+        "unresolved": cap.unresolved,
     }
 
     if cap.error:
         return result
 
     result["faithfulness"] = asdict(faithfulness(cap.answer_claims, cap.context_chunks))
-    result["answer_relevancy"] = asdict(answer_relevancy(cap.answer_claims, gene, trait_name))
+    # unresolved (no UniProt/KEGG id to key off of, zero reviewed hits, etc.)
+    # is a coverage gap, not a relevancy judgment -- scoring it into
+    # answer_relevancy is what was flattening kegg_pathways to 0.00 even
+    # though the pathways that *did* resolve were genuinely on-topic. It's
+    # still recorded (see "resolution rate" in the scorecard) just not
+    # blended into this average.
+    if not cap.unresolved:
+        result["answer_relevancy"] = asdict(await answer_relevancy(cap.answer_claims, gene, trait_name))
     if node in NODE_TO_EXPECTED_KEY:
         expected_terms = case.get(NODE_TO_EXPECTED_KEY[node]) or []
         result["context_recall"] = asdict(context_recall(expected_terms, cap.context_chunks))
@@ -122,8 +130,14 @@ def print_scorecard(results: list[dict[str, Any]]) -> None:
     for collection, rows in sorted(by_collection.items(), key=lambda kv: str(kv[0])):
         errored = [r for r in rows if r["error"]]
         ok = [r for r in rows if not r["error"]]
+        unresolved = [r for r in ok if r.get("unresolved")]
         print(f"[{collection}] — {len(rows)} gene(s) evaluated, {len(errored)} errored")
         if ok:
+            resolved_n = len(ok) - len(unresolved)
+            print(f"  {'resolution_rate':<18} {resolved_n}/{len(ok)}  (an answer was actually produced)")
+            if unresolved:
+                genes = ", ".join(r["gene"] for r in unresolved)
+                print(f"  {'':<18} unresolved genes: {genes}")
             for metric in ("faithfulness", "answer_relevancy", "context_recall", "context_precision"):
                 scores = [r[metric]["score"] for r in ok if metric in r]
                 if scores:

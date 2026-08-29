@@ -4,13 +4,24 @@ synthetic RetrievedDocument objects. These exist to (a) prove the metric
 functions themselves are correct before trusting a live scorecard, and (b)
 cover Step 6.2 of the guide directly: a malformed/incomplete payload must
 fail loudly via validate_document(), not be silently treated as complete.
+
+answer_relevancy is embedding-based (see rag_evaluators.py), so these tests
+monkeypatch rag_evaluators.embed_text with a tiny deterministic bag-of-words
+embedder instead of loading the real sentence-transformers model -- keeps
+this suite fast and dependency-free while still exercising the real cosine-
+similarity code path (not just re-testing token overlap under a new name).
 """
+import asyncio
+import math
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import rag_evaluators  # noqa: E402
 from kb.retrieval import RetrievedDocument, validate_document  # noqa: E402
 from rag_evaluators import (  # noqa: E402
     answer_relevancy,
@@ -19,6 +30,30 @@ from rag_evaluators import (  # noqa: E402
     faithfulness,
     payload_contract,
 )
+
+
+def _fake_embed_vocab(text: str) -> dict[str, int]:
+    return {w: 1 for w in rag_evaluators._tokenize(text)}
+
+
+async def _fake_embed_text(text: str) -> list[float]:
+    """Deterministic unit-normalized bag-of-words vector over a small fixed
+    vocabulary shared by all test cases below -- enough to make "shares a
+    concept" score high and "shares nothing" score ~0, without pulling in
+    a real embedding model."""
+    vocab = sorted({
+        "response", "cold", "hallmark", "adaptation", "caffeine",
+        "metabolism", "pathway", "unrelated",
+    })
+    bag = _fake_embed_vocab(text)
+    vec = [1.0 if w in bag else 0.0 for w in vocab]
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+    return [v / norm for v in vec]
+
+
+@pytest.fixture(autouse=True)
+def _patch_embeddings(monkeypatch):
+    monkeypatch.setattr(rag_evaluators, "embed_text", _fake_embed_text)
 
 
 def _doc(id_: str, gene_symbol: str, **extra) -> RetrievedDocument:
@@ -53,22 +88,25 @@ def test_faithfulness_no_claims_is_vacuously_faithful():
 # ---------------------------------------------------------------------------
 
 def test_answer_relevancy_on_topic():
-    # claim shares literal tokens with the gene/trait query -- the case pure
-    # token overlap is actually meant to catch (see docstring for the
-    # known false-negative case where wording differs but topic doesn't)
-    result = answer_relevancy(["response to cold is a hallmark of cold adaptation"], gene="UCP1", trait_name="cold adaptation")
+    # claim shares the underlying concept with the gene/trait query -- with
+    # the fake embedder that means shared vocabulary tokens (cold/adaptation).
+    result = asyncio.run(answer_relevancy(
+        ["response to cold is a hallmark of cold adaptation"], gene="UCP1", trait_name="cold adaptation"
+    ))
     assert result.score > 0.0
 
 
 def test_answer_relevancy_off_topic_pathway_flagged():
     # the guide's own example: a pathways answer about an unrelated pathway
-    result = answer_relevancy(["unrelated caffeine metabolism pathway"], gene="UCP1", trait_name="cold adaptation")
+    result = asyncio.run(answer_relevancy(
+        ["unrelated caffeine metabolism pathway"], gene="UCP1", trait_name="cold adaptation"
+    ))
     assert result.score == 0.0
     assert "unrelated caffeine metabolism pathway" in result.detail
 
 
 def test_answer_relevancy_no_answer_scores_zero():
-    result = answer_relevancy([], gene="UCP1", trait_name="cold adaptation")
+    result = asyncio.run(answer_relevancy([], gene="UCP1", trait_name="cold adaptation"))
     assert result.score == 0.0
 
 
