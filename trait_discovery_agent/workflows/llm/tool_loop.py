@@ -4,7 +4,7 @@ import time
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from .client import _candidate_models, _parse_json_object, _retry_on_capacity, _is_missing_model_error, get_llm
+from .client import _candidate_models, _parse_json_object, _retry_on_capacity, _is_advance_worthy_error, _reasoning_off_preamble, get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ async def invoke_tool_loop_with_fallback(
         )
 
         convo: list = [
-            SystemMessage(content=system_prompt),
+            SystemMessage(content=_reasoning_off_preamble() + system_prompt),
             HumanMessage(content=human_prompt),
         ]
         tool_call_log: list[dict] = []
@@ -208,7 +208,7 @@ async def invoke_tool_loop_with_fallback(
             )
         except Exception as exc:
             last_error = exc
-            if not _is_missing_model_error(exc):
+            if not _is_advance_worthy_error(exc):
                 raise
 
     if last_error is not None:

@@ -3,7 +3,7 @@ import logging
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 
-from .client import _candidate_models, _parse_json_object, _retry_on_capacity, _is_missing_model_error, get_llm
+from .client import _candidate_models, _parse_json_object, _retry_on_capacity, _is_advance_worthy_error, _reasoning_off_preamble, get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ async def invoke_with_fallback(
             return await _retry_on_capacity(lambda: chain.ainvoke(payload))
         except Exception as exc:  # pragma: no cover - exercised in live NIM runs
             last_error = exc
-            if not _is_missing_model_error(exc):
+            if not _is_advance_worthy_error(exc):
                 raise
 
     if last_error is not None:
@@ -58,7 +58,7 @@ async def invoke_json_with_fallback(
     for candidate_model in _candidate_models(model):
         llm = get_llm(temperature=temperature, model=candidate_model)
         convo = [
-            SystemMessage(content=system_prompt),
+            SystemMessage(content=_reasoning_off_preamble() + system_prompt),
             HumanMessage(content=human_prompt),
         ]
         try:
@@ -71,7 +71,7 @@ async def invoke_json_with_fallback(
             return parsed
         except Exception as exc:
             last_error = exc
-            if not _is_missing_model_error(exc):
+            if not _is_advance_worthy_error(exc):
                 raise
 
     if last_error is not None:
