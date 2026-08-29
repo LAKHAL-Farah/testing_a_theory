@@ -3,7 +3,17 @@ import logging
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 
-from .client import _candidate_models, _parse_json_object, _retry_on_capacity, _is_advance_worthy_error, _reasoning_off_preamble, get_llm
+from .client import (
+    NonJSONFinalAnswerError,
+    TruncatedCompletionError,
+    _candidate_models,
+    _parse_json_object,
+    _retry_on_capacity,
+    _is_advance_worthy_error,
+    _is_truncated_completion,
+    _reasoning_off_preamble,
+    get_llm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +73,21 @@ async def invoke_json_with_fallback(
         ]
         try:
             ai_msg = await _retry_on_capacity(lambda: llm.ainvoke(convo))
+            if _is_truncated_completion(ai_msg):
+                raise TruncatedCompletionError(
+                    f"{candidate_model}: completion truncated by max_tokens "
+                    "(finish_reason=length)"
+                )
             parsed = _parse_json_object(ai_msg.content)
             if parsed is None:
-                raise RuntimeError(
+                if ai_msg.content is None:
+                    reasoning = (ai_msg.additional_kwargs or {}).get("reasoning_content")
+                    logger.warning(
+                        "%s: content is None (likely still mid hidden-analysis "
+                        "channel at max_tokens); reasoning_content length=%s",
+                        candidate_model, len(reasoning) if reasoning else 0,
+                    )
+                raise NonJSONFinalAnswerError(
                     f"Model returned a non-JSON final answer: {ai_msg.content!r}"
                 )
             return parsed

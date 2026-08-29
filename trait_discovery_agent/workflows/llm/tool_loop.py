@@ -4,7 +4,17 @@ import time
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from .client import _candidate_models, _parse_json_object, _retry_on_capacity, _is_advance_worthy_error, _reasoning_off_preamble, get_llm
+from .client import (
+    NonJSONFinalAnswerError,
+    TruncatedCompletionError,
+    _candidate_models,
+    _parse_json_object,
+    _retry_on_capacity,
+    _is_advance_worthy_error,
+    _is_truncated_completion,
+    _reasoning_off_preamble,
+    get_llm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +39,29 @@ def _coerce_stringified_json_args(args: dict) -> dict:
     unchanged. This runs once, at the loop level, so every tool bound via
     invoke_tool_loop_with_fallback benefits — not just the one tool where
     this was first observed.
+
+    Raises TruncatedCompletionError if a value LOOKS like the start of a
+    JSON array/object (`[` or `{`) but fails to parse — that combination
+    essentially only happens when max_tokens cut generation off mid-value
+    (observed verbatim: go_ids='["GO:0051726", "GO:0008630", "GO:0'). This
+    used to fall through the `continue` below and hand the raw truncated
+    string to the tool, which raised an opaque, non-advance-worthy Pydantic
+    ValidationError several layers away from the actual cause, discarding
+    the LLM's pick and falling back to the deterministic heuristic every
+    time a batched call (e.g. resolve_go_term_names over a dozen+ GO ids)
+    ran long. Raising here instead lets the caller treat it the same as any
+    other truncated completion — see _is_truncated_completion.
     """
     coerced = dict(args)
     for key, value in args.items():
         if isinstance(value, str) and value[:1] in "[{":
             try:
                 parsed_value = json.loads(value)
-            except (json.JSONDecodeError, ValueError):
-                continue
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise TruncatedCompletionError(
+                    f"Tool argument {key!r} looks like truncated JSON "
+                    f"(max_tokens cut the completion off mid-value): {value!r}"
+                ) from exc
             if isinstance(parsed_value, (list, dict)):
                 coerced[key] = parsed_value
     return coerced
@@ -129,6 +154,17 @@ async def invoke_tool_loop_with_fallback(
                     "Turn %d/%d: got a response after %.1fs.",
                     turn + 1, turns_limit, time.monotonic() - turn_start,
                 )
+                if _is_truncated_completion(ai_msg):
+                    # Caught here, before parsing .content or executing a
+                    # tool call with possibly-incomplete arguments, since not
+                    # every truncation produces an obviously-malformed value
+                    # (see TruncatedCompletionError) -- finish_reason=="length"
+                    # is the API telling us directly, so there's no reason to
+                    # wait for a downstream parse/Pydantic failure to infer it.
+                    raise TruncatedCompletionError(
+                        f"{candidate_model}: completion truncated by max_tokens "
+                        f"(finish_reason=length) on turn {turn + 1}/{turns_limit}"
+                    )
                 convo.append(ai_msg)
 
                 tool_calls = getattr(ai_msg, "tool_calls", None)
@@ -166,7 +202,14 @@ async def invoke_tool_loop_with_fallback(
                         continue
 
                     if parsed is None or disguised is not None:
-                        raise RuntimeError(
+                        if ai_msg.content is None:
+                            reasoning = (ai_msg.additional_kwargs or {}).get("reasoning_content")
+                            logger.warning(
+                                "%s: content is None (likely still mid hidden-analysis "
+                                "channel at max_tokens); reasoning_content length=%s",
+                                candidate_model, len(reasoning) if reasoning else 0,
+                            )
+                        raise NonJSONFinalAnswerError(
                             f"Model returned a non-JSON final answer: {ai_msg.content!r}"
                         )
                     return parsed, tool_call_log

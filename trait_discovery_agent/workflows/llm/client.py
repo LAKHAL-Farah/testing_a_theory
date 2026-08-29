@@ -21,7 +21,7 @@ load_dotenv(override=False)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = os.getenv("NIM_MODEL", "meta/llama-3.1-8b-instruct")
+DEFAULT_MODEL = os.getenv("NIM_MODEL", "nvidia/nemotron-3-nano-30b-a3b")
 DEFAULT_BASE_URL = os.getenv("NIM_BASE_URL")
 
 # Additional models to try, in order, if DEFAULT_MODEL 404/410s (retired,
@@ -30,67 +30,89 @@ DEFAULT_BASE_URL = os.getenv("NIM_BASE_URL")
 # var so an operator can widen/reorder this without a code change;
 # NIM_MODEL itself always tried first.
 #
-# NVIDIA's free-tier NIM catalog is being pruned unusually aggressively as of
-# Aug 2026 (see e.g. github.com/diegosouzapw/OmniRoute#9824) -- multiple
-# unrelated model families hitting 410 within the same window, and
-# ChatNVIDIA.get_available_models() itself has been observed lagging behind
-# real availability, so a short 2-model list gets exhausted fast. This list
-# is deliberately long and spans *independent* publishers/architectures so a
-# single vendor's deprecation wave can't take out the whole chain at once.
+# probe_all_models.py (raw HTTP, no LangChain, no retry/fallback machinery --
+# see that file for the full method) hit every plain-instruct model this
+# chain used to lean on -- Llama 3.1, Granite, Phi-4, Mistral-Small,
+# Qwen3-Instruct, Kimi-K2, mistral-nemotron, the old Nemotron-Super lines --
+# and found 41 of 46 candidates dead (404/410/error) on this key as of Aug
+# 2026. Only 5 came back ALIVE, and all 5 are hybrid-reasoning models:
+#   nvidia/nemotron-3-nano-30b-a3b
+#   nvidia/nemotron-3-super-120b-a12b
+#   nvidia/nemotron-3-ultra-550b-a55b
+#   openai/gpt-oss-20b
+#   openai/gpt-oss-120b
+# (The two GPT-OSS entries came back with `content: None` even on that
+# probe's 5-token budget -- not an error, just the hidden "analysis" channel
+# never finishing in time. See the MAX_TOKENS/timeout comments below and
+# NonJSONFinalAnswerError for how that's handled here.)
 #
-# Ordering, two rules:
-# 1. Plain (non-reasoning) instruct models come FIRST. Hybrid-reasoning
-#    models (Nemotron, DeepSeek-R1-style, Qwen3-thinking, GPT-OSS's default
-#    analysis channel, ...) were observed burning the entire max_tokens
-#    budget on visible chain-of-thought before ever reaching the JSON final
-#    answer -- every LLM pick failed and silently fell back to deterministic
-#    heuristics, tanking answer_relevancy/context_recall in the eval.
-#    Nemotron reasoning models also expose a "/no_think"/"detailed thinking
-#    off" toggle (_reasoning_off_preamble below) but it did NOT reliably
-#    suppress the chain-of-thought in practice, so plain instruct models --
-#    which were never trained to think out loud in the first place -- are
-#    the primary defense, not the toggle. Where a publisher tags separate
-#    "-instruct" vs "-thinking" variants (Qwen3, Kimi-K2), the "-instruct"
-#    one is used here for exactly that reason.
-# 2. Smaller/lighter models come before larger ones of similar type.
-#    mistral-nemotron (NVIDIA's function-calling-tuned model, previously
-#    primary here) was observed timing out and 500ing repeatedly across
-#    several eval runs while still showing supports_tools=True and
-#    "reachable" in list_nim_models.py -- i.e. genuinely live but
-#    under-provisioned/overloaded on the free tier right now, not
-#    deprecated. An 8B model has a much better shot at spare shared-pool
-#    capacity than a large one, so smaller plain-instruct models now lead;
-#    mistral-nemotron is demoted to mid-chain rather than dropped, since
-#    "overloaded right now" isn't permanent the way a 410 is.
-# The hybrid-reasoning models are kept at the tail as an absolute last
-# resort, not removed entirely, in case every plain instruct model in this
-# list gets pruned or is having a bad day at once.
-# Re-run list_nim_models.py periodically and prune/reorder this if entries
-# go stale.
+# There is currently no live plain-instruct model on this key at all, so the
+# old "plain instruct models first, reasoning models as a last resort" chain
+# is no longer just non-optimal, it's *empty* -- every entry in it 404s
+# before ever reaching a model that would actually answer. This chain is
+# rebuilt entirely around the 5 confirmed-alive models instead: see
+# MAX_TOKENS and get_llm's `timeout` for how the visible/hidden
+# chain-of-thought these models produce is accommodated rather than avoided.
+# _reasoning_off_preamble is still sent (harmless if ignored) but is no
+# longer the primary defense -- nemotron-3-super-120b-a12b was observed
+# reasoning fully despite it, so it can't be relied on alone.
+#
+# Ordering: smaller/lighter models first (faster, better shot at spare
+# shared free-tier capacity), alternating Nemotron/GPT-OSS so one
+# publisher's bad day doesn't take out consecutive candidates. The two
+# `-a<N>b` MoE models with the smallest active-parameter counts lead;
+# nemotron-3-ultra-550b-a55b -- by far the largest and slowest of the five --
+# is the last resort.
+# Re-run probe_all_models.py periodically (this catalog is being pruned
+# unusually aggressively) and prune/reorder this if entries go stale, or if
+# plain-instruct models come back alive and should retake the front of the
+# chain for latency's sake.
 _EXTRA_FALLBACKS = tuple(
     m.strip() for m in os.getenv(
         "NIM_FALLBACK_MODELS",
-        "meta/llama-3.1-8b-instruct,"
-        "ibm/granite-3.3-8b-instruct,"
-        "microsoft/phi-4-mini-instruct,"
-        "mistralai/mistral-small-3.1-24b-instruct-2503,"
-        "qwen/qwen3-next-80b-a3b-instruct,"
-        "moonshotai/kimi-k2-instruct,"
-        "mistralai/mistral-nemotron,"
-        "meta/llama-3.1-70b-instruct,"
-        "meta/llama-3.1-405b-instruct,"
+        "nvidia/nemotron-3-nano-30b-a3b,"
+        "openai/gpt-oss-20b,"
         "nvidia/nemotron-3-super-120b-a12b,"
-        "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+        "openai/gpt-oss-120b,"
+        "nvidia/nemotron-3-ultra-550b-a55b",
     ).split(",")
     if m.strip()
 )
 FALLBACK_MODELS = tuple(dict.fromkeys((DEFAULT_MODEL, *_EXTRA_FALLBACKS)))
 
-# 2048 rather than the original 512: plain instruct models rarely need this
-# much, but it's cheap headroom for verbose final-answer reasoning fields
-# and for the last-resort reasoning models at the tail of FALLBACK_MODELS
-# above, which need real room even with thinking nominally toggled off.
-MAX_TOKENS = int(os.getenv("NIM_MAX_TOKENS", "2048"))
+# 8192 rather than the previous 2048: every model in FALLBACK_MODELS is now a
+# hybrid-reasoning model with no plain-instruct model shielding it, and
+# nemotron-3-super-120b-a12b has been observed reasoning fully -- burning the
+# *entire* previous 2048-token budget on visible chain-of-thought -- even
+# with the reasoning-off preamble in place, so that preamble can no longer
+# be trusted as the thing that keeps completions short. Token budget is now
+# the primary defense: give these models enough room to think AND still
+# reach the JSON final answer, rather than trying to suppress the thinking
+# in the first place. GPT-OSS's hidden "analysis" channel is a related but
+# distinct case -- see NonJSONFinalAnswerError below for what happens if it
+# still doesn't finish in time.
+# 16384 rather than 8192: BRCA1-style genes with a dozen+ GO candidates hit
+# resolve_go_term_names(go_ids=[...]) as ONE batched tool call (see
+# subagents/gene_mapper/llm_pick.py) -- when a reasoning model's visible
+# chain-of-thought already ate deep into the budget before it starts
+# emitting that call, there isn't enough left to finish a long go_ids list,
+# and the completion gets cut off mid-argument (observed verbatim:
+# go_ids='["GO:0051726", "GO:0008630", "GO:0' -- a truncated JSON string,
+# not garbage). See _is_truncated_completion below for how that's now
+# detected and treated as advance-worthy instead of crashing the whole
+# decision with an opaque pydantic ValidationError three layers away from
+# the actual cause.
+MAX_TOKENS = int(os.getenv("NIM_MAX_TOKENS", "16384"))
+
+# langchain_nvidia_ai_endpoints defaults to a 60s timeout (see its
+# _NVIDIAClient.timeout) -- fine for a plain-instruct model's near-instant
+# reply, but a real constraint now that every candidate in FALLBACK_MODELS
+# produces thousands of tokens of chain-of-thought before its final answer.
+# 180s gives the larger reasoning models (nemotron-3-ultra-550b-a55b,
+# openai/gpt-oss-120b) realistic room to actually finish an 8192-token
+# completion rather than getting cut off mid-thought and counted as a
+# _is_timeout_error advance-worthy failure before they had a fair shot.
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("NIM_REQUEST_TIMEOUT_SECONDS", "180"))
 
 MAX_CAPACITY_RETRIES = 3
 CAPACITY_RETRY_BASE_SECONDS = 1.5
@@ -135,19 +157,23 @@ def get_llm(temperature: float = 0.1, model: str | None = None) -> ChatNVIDIA:
         max_tokens=MAX_TOKENS,
         api_key=api_key,
         base_url=DEFAULT_BASE_URL,
+        # Client transport option, not a generation param -- ChatNVIDIA pops
+        # it out of kwargs itself (see REQUEST_TIMEOUT_SECONDS above for why
+        # the library's 60s default no longer fits this model chain).
+        timeout=REQUEST_TIMEOUT_SECONDS,
     )
 
 
 def _reasoning_off_preamble() -> str:
-    """Prefix for the first system message, telling any reasoning-capable
+    """Prefix for the first system message, ASKING any reasoning-capable
     model in FALLBACK_MODELS to skip its chain-of-thought and answer
-    directly. Every model here is expected to produce ONLY a JSON object as
-    its final answer (see each subagent's system prompt) -- there's no
-    caller that wants or parses visible reasoning tokens, so thinking mode
-    only costs latency/tokens and, worse, can burn the whole max_tokens
-    budget on the chain-of-thought before the model ever reaches the JSON
-    (observed on NIM's Nemotron family, whose reasoning mode is on by
-    default unless told otherwise).
+    directly. Kept because it's free and occasionally still helps, but it is
+    NOT the primary defense against long/truncated completions any more --
+    nemotron-3-super-120b-a12b has been observed reasoning fully despite it.
+    Since every model in FALLBACK_MODELS is now a hybrid-reasoning model
+    (see that comment), MAX_TOKENS and get_llm's `timeout` are what actually
+    keep completions from getting cut off mid-thought; this preamble is best
+    read as a latency optimization that sometimes pays off, not a guarantee.
 
     Stacks the different per-family directives NVIDIA documents (see
     docs.nvidia.com/nim/large-language-models/latest/reasoning-model.html
@@ -155,7 +181,14 @@ def _reasoning_off_preamble() -> str:
     1.5 / Nano use '/no_think', older Nemotron reasoning models use the
     literal phrase 'detailed thinking off'. A model that doesn't recognize
     either is expected to just treat this as inert prefix text ahead of the
-    real system prompt -- harmless for non-reasoning models."""
+    real system prompt -- harmless for non-reasoning models. (NVIDIA's
+    ChatNVIDIA client also exposes a structured `thinking_mode=False` kwarg
+    on invoke/ainvoke that resolves the right per-model toggle from its own
+    catalog metadata instead of this hand-rolled string -- worth trying if a
+    future model in this chain ignores both phrases above -- but it hasn't
+    been adopted here since the string form already covers every model
+    currently in FALLBACK_MODELS and, per above, neither approach is being
+    relied on as the primary defense right now.)"""
     return "/no_think\ndetailed thinking off\n\n"
 
 
@@ -182,20 +215,78 @@ def _is_missing_model_error(exc: Exception) -> bool:
     return "page not found" in message
 
 
+class NonJSONFinalAnswerError(RuntimeError):
+    """Raised by json_completion.py / tool_loop.py when a model's final
+    answer isn't parseable JSON -- including a bare `None` content, observed
+    on both GPT-OSS models: they route chain-of-thought through a separate
+    hidden "analysis" channel (surfaced by langchain_nvidia_ai_endpoints as
+    `additional_kwargs["reasoning_content"]`, not `.content`) and can hit
+    max_tokens before that channel ever hands off to the visible completion
+    -- `.content` is then simply None, not an error, so nothing upstream of
+    _parse_json_object caught this until now.
+
+    Treated as advance-worthy (see _is_advance_worthy_error): MAX_TOKENS is
+    already generous account-wide, so if a model still doesn't get to a
+    parseable final answer within it, trying the next candidate in
+    FALLBACK_MODELS is strictly better than hard-failing the whole
+    gene/pathway/protein decision -- same reasoning as a persistent timeout
+    or 5xx."""
+
+
+class TruncatedCompletionError(NonJSONFinalAnswerError):
+    """Raised when a completion was cut off mid-generation by max_tokens --
+    either the API says so directly (finish_reason == "length", see
+    _is_truncated_completion) or the shape of a tool-call argument makes it
+    unmistakable, e.g. a string that starts like a JSON array/object but
+    fails to parse (go_ids='["GO:0051726", "GO:0008630", "GO:0' -- observed
+    verbatim on a BRCA1 gene-mapper decision: a dozen+ candidate GO ids
+    batched into one resolve_go_term_names call ran out of room mid-list).
+
+    Previously this reached _coerce_stringified_json_args, which silently
+    left the truncated string as-is (its docstring only ever anticipated a
+    *complete* JSON-encoded string, not a cut-off one), and the tool's own
+    Pydantic schema then raised a plain ValidationError several layers away
+    from the actual cause -- a plain ValidationError isn't advance-worthy,
+    so it aborted the entire gene/pathway/protein decision instead of
+    trying the next candidate model, discarding a real LLM pick every time
+    this happened. Subclassing NonJSONFinalAnswerError means the existing
+    isinstance check in _is_advance_worthy_error covers this for free."""
+
+
+def _is_truncated_completion(ai_msg) -> bool:
+    """True if the API itself reports this completion was cut off by
+    max_tokens (finish_reason == "length") rather than completing normally
+    (finish_reason == "stop"/"tool_calls"). Checked immediately after every
+    LLM turn in tool_loop.py, before any attempt to parse `.content` or
+    execute a tool call with what might be truncated arguments -- catching
+    this here is strictly more reliable than inferring it after the fact
+    from a parse failure (see TruncatedCompletionError), since not every
+    truncation produces an obviously-malformed value (a short go_ids list
+    cut off exactly on an element boundary would look valid, just
+    incomplete)."""
+    return (getattr(ai_msg, "response_metadata", None) or {}).get("finish_reason") == "length"
+
+
 def _is_advance_worthy_error(exc: Exception) -> bool:
     """Whether _candidate_models' caller should move on to the NEXT model in
     FALLBACK_MODELS rather than raising. True for missing-model errors
     (above), a timeout that _retry_on_capacity already retried and gave up
-    on, and a persistent 5xx server error -- each of these means the model
-    is, for the purposes of finishing this request, exactly as unusable as
-    one that 404s, and there's no reason to sacrifice the whole
-    gene/pathway/protein decision (falling back to a deterministic
-    heuristic) when another model in the chain might just work. Rate-limit
-    and capacity (503) errors are NOT included here: those are properties of
-    your account/quota or of NIM's shared worker pool, not the specific
-    model, so switching models wouldn't help and would just mask the real
-    signal (slow down / check quota)."""
-    return _is_missing_model_error(exc) or _is_timeout_error(exc) or _is_server_error(exc)
+    on, a persistent 5xx server error, and a non-JSON/None final answer
+    (NonJSONFinalAnswerError) -- each of these means the model is, for the
+    purposes of finishing this request, exactly as unusable as one that
+    404s, and there's no reason to sacrifice the whole gene/pathway/protein
+    decision (falling back to a deterministic heuristic) when another model
+    in the chain might just work. Rate-limit and capacity (503) errors are
+    NOT included here: those are properties of your account/quota or of
+    NIM's shared worker pool, not the specific model, so switching models
+    wouldn't help and would just mask the real signal (slow down / check
+    quota)."""
+    return (
+        isinstance(exc, NonJSONFinalAnswerError)
+        or _is_missing_model_error(exc)
+        or _is_timeout_error(exc)
+        or _is_server_error(exc)
+    )
 
 
 def _is_capacity_error(exc: Exception) -> bool:
@@ -349,11 +440,18 @@ def _candidate_models(model: str | None) -> list[str]:
     return candidate_models
 
 
-def _parse_json_object(content: str) -> dict | None:
+def _parse_json_object(content: str | None) -> dict | None:
     """Best-effort extraction of a single JSON object from a model's final text,
-    tolerating markdown code fences."""
+    tolerating markdown code fences.
+
+    `content` can be None -- observed on both GPT-OSS models when their
+    hidden "analysis" channel hasn't handed off to the visible completion
+    channel yet (see NonJSONFinalAnswerError). Treated the same as any other
+    unparseable answer rather than raising AttributeError on `.strip()`."""
     import json
 
+    if not content:
+        return None
     text = content.strip()
     if "```json" in text:
         text = text.split("```json", 1)[1].split("```", 1)[0]
