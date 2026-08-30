@@ -173,8 +173,6 @@ async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top
     query_text = f"{trait_name} {gene}"
     cap = NodeCapture(node="gene_mapper", gene=gene, collection="go_annotations", query_text=query_text)
     try:
-        cap.context_chunks = await _capture_context("go_annotations", query_text, top_k, gene=gene)
-
         tax_id = SPECIES_TAX_ID.get(species_name)
         accession = await _resolve_uniprot_accession(gene, tax_id) if tax_id else None
         if accession is None:
@@ -185,6 +183,11 @@ async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top
             cap.raw_output = None
             cap.answer_claims = []
             cap.unresolved = True
+            # Nothing was ever going to be written to Qdrant on this branch
+            # (the agent is never called), so capturing context here vs.
+            # earlier makes no difference -- kept after the branch purely so
+            # both branches share one capture call at the end of this function.
+            cap.context_chunks = await _capture_context("go_annotations", query_text, top_k, gene=gene)
             return cap
 
         out = await gene_mapper_agent(GeneMapperInput(
@@ -207,6 +210,17 @@ async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top
             for a in picks
         ]
         cap.unresolved = not cap.answer_claims
+        # Capture context AFTER the agent call, not before: gene_mapper_agent
+        # writes this gene's own pick *and* every other real QuickGO
+        # candidate into Qdrant as it runs (the "KB enrichment" fix). Search-
+        # ing beforehand scores context_recall/precision against whatever
+        # existed prior to this call -- for any gene queried for the first
+        # time that's an empty collection, which floors recall at 0.00
+        # regardless of retrieval quality (this is what was driving
+        # sparse_go=0.00 and the low happy_path average -- a cold-KB
+        # artifact, not a retrieval defect). Searching after this call means
+        # the score reflects the KB state a real subsequent query would see.
+        cap.context_chunks = await _capture_context("go_annotations", query_text, top_k, gene=gene)
     except Exception as exc:  # pragma: no cover - live-dependency failures surface as eval findings
         cap.error = f"{type(exc).__name__}: {exc}"
     return cap
@@ -216,8 +230,6 @@ async def capture_pathways(gene: str, trait_name: str, species_name: str, top_k:
     query_text = f"{trait_name} {gene} pathway"
     cap = NodeCapture(node="pathways", gene=gene, collection="kegg_pathways", query_text=query_text)
     try:
-        cap.context_chunks = await _capture_context("kegg_pathways", query_text, top_k, gene=gene)
-
         tax_id = SPECIES_TAX_ID.get(species_name)
         org_code = SPECIES_KEGG_ORG.get(species_name)
         kegg_gene_id = None
@@ -230,6 +242,7 @@ async def capture_pathways(gene: str, trait_name: str, species_name: str, top_k:
             cap.raw_output = None
             cap.answer_claims = []
             cap.unresolved = True
+            cap.context_chunks = await _capture_context("kegg_pathways", query_text, top_k, gene=gene)
             return cap
 
         out = await pathways_agent(PathwaysInput(
@@ -247,6 +260,8 @@ async def capture_pathways(gene: str, trait_name: str, species_name: str, top_k:
             for p in out.pathways
         ]
         cap.unresolved = not cap.answer_claims
+        # See capture_gene_mapper: capture context after the write, not before.
+        cap.context_chunks = await _capture_context("kegg_pathways", query_text, top_k, gene=gene)
     except Exception as exc:  # pragma: no cover
         cap.error = f"{type(exc).__name__}: {exc}"
     return cap
@@ -256,8 +271,6 @@ async def capture_protein_data(gene: str, trait_name: str, species_name: str, to
     query_text = f"{trait_name} {gene} protein function"
     cap = NodeCapture(node="protein_data", gene=gene, collection="uniprot_proteins", query_text=query_text)
     try:
-        cap.context_chunks = await _capture_context("uniprot_proteins", query_text, top_k, gene=gene)
-
         tax_id = SPECIES_TAX_ID.get(species_name)
         if tax_id is None:
             cap.error = f"no tax_id mapping for species_name={species_name!r}"
@@ -276,6 +289,9 @@ async def capture_protein_data(gene: str, trait_name: str, species_name: str, to
         # coverage-gap shape as the gene_mapper/pathways unresolved case
         # above -- not an off-topic answer.
         cap.unresolved = not cap.answer_claims and gene in (out.missing_genes or [])
+        # See capture_gene_mapper: capture context after the write, not
+        # before, so recall/precision reflect this call's own enrichment.
+        cap.context_chunks = await _capture_context("uniprot_proteins", query_text, top_k, gene=gene)
     except Exception as exc:  # pragma: no cover
         cap.error = f"{type(exc).__name__}: {exc}"
     return cap
@@ -298,6 +314,16 @@ async def capture_literature_support(gene: str, trait_name: str) -> NodeCapture:
             for r in out.evidence
         ]
         cap.answer_claims = [r.short_summary for r in out.evidence]
+        # Zero evidence here means the mock/live literature source has
+        # nothing indexed for this trait+gene (e.g. mock_literature_support's
+        # _MOCK_LITERATURE_DB only covers a couple of trait_name keys) -- a
+        # coverage gap, same shape as gene_mapper/pathways/protein_data's
+        # unresolved case, not an off-topic answer. Without this,
+        # answer_relevancy() short-circuits empty claims to a hard 0.0 and
+        # run_eval.py has no unresolved flag to exclude it on, silently
+        # folding every zero-evidence gene into the average as if it were a
+        # bad (rather than absent) answer.
+        cap.unresolved = not cap.answer_claims
     except Exception as exc:  # pragma: no cover
         cap.error = f"{type(exc).__name__}: {exc}"
     return cap
