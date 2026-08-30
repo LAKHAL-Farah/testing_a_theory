@@ -59,6 +59,32 @@ _RELEVANCY_OFF_TOPIC_THRESHOLD = 0.25
 
 _cross_encoder = None
 
+# Set RAG_EVAL_DEBUG_RELEVANCY=1 to log the *raw* (pre-sigmoid) cross-encoder
+# logit for every single (query, claim) pair scored, plus a min/max/mean
+# summary per call. answer_relevancy has been reported near-zero (0.00-0.13)
+# across every collection -- including literature_support, whose claims come
+# from a hardcoded mock dict, not an LLM -- which rules out "bad/garbled
+# generated text" as the cause and points at this scoring step itself.
+#
+# Leading hypothesis: cross-encoder/ms-marco-MiniLM-L-6-v2 is trained on
+# MS MARCO web query/passage pairs (full-sentence passages, search-engine
+# click relevance). Our claims are short biomedical fragments -- bare GO
+# term names, one-clause function summaries -- a very different text style
+# from what the model calibrated its score scale on. It's plausible its raw
+# logits for a *genuinely correct* match here still land around -3 to -8
+# (sigmoid(-5) = 0.007, sigmoid(-3) = 0.047), which would look exactly like
+# what the scorecard shows regardless of whether the claim is actually
+# on-topic. This logging exists to check that against real numbers instead
+# of guessing further -- if raw_scores for known-correct claims cluster
+# solidly negative, the fix is recalibrating the score range (e.g.
+# percentile/min-max rescaling against a per-query negative-control claim,
+# or lowering the sigmoid temperature) rather than swapping models again.
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+_DEBUG_RELEVANCY = os.environ.get("RAG_EVAL_DEBUG_RELEVANCY") == "1"
+
 
 def _get_relevance_cross_encoder():
     global _cross_encoder
@@ -76,9 +102,25 @@ def _score_relevance_pairs(query: str, claims: list[str]) -> list[float]:
     so tests can monkeypatch this one call instead of needing the real
     ~90MB MS MARCO cross-encoder model.
     """
+    if not claims:
+        return []
+
     encoder = _get_relevance_cross_encoder()
-    raw_scores = encoder.predict([(query, claim) for claim in claims])
-    return [max(0.0, min(1.0 / (1.0 + math.exp(-float(s))), 1.0)) for s in raw_scores]
+    raw_scores = [float(s) for s in encoder.predict([(query, claim) for claim in claims])]
+    sigmoid_scores = [max(0.0, min(1.0 / (1.0 + math.exp(-s)), 1.0)) for s in raw_scores]
+
+    if _DEBUG_RELEVANCY:
+        for claim, raw, sig in zip(claims, raw_scores, sigmoid_scores):
+            logger.info(
+                "[answer_relevancy] query=%r claim=%r raw_logit=%.3f sigmoid=%.4f",
+                query, claim, raw, sig,
+            )
+        logger.info(
+            "[answer_relevancy] batch summary: n=%d raw_min=%.3f raw_max=%.3f raw_mean=%.3f",
+            len(raw_scores), min(raw_scores), max(raw_scores), sum(raw_scores) / len(raw_scores),
+        )
+
+    return sigmoid_scores
 
 
 def _tokenize(text: str) -> set[str]:

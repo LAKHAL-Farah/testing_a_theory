@@ -18,6 +18,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+import os
 import sys
 from collections import defaultdict
 from dataclasses import asdict
@@ -25,6 +27,13 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+# RAG_EVAL_DEBUG_RELEVANCY=1 also enables per-claim raw-vs-sigmoid logging in
+# rag_evaluators.py -- without a handler configured here those logger.info()
+# calls are silently dropped by Python's default logging setup (root logger
+# defaults to WARNING with no handler), so this is required, not cosmetic.
+if os.environ.get("RAG_EVAL_DEBUG_RELEVANCY") == "1":
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

@@ -1,0 +1,46 @@
+diff --git a/kb/embeddings.py b/kb/embeddings.py
+index 6c3d205..c48cf53 100644
+--- a/kb/embeddings.py
++++ b/kb/embeddings.py
+@@ -3,11 +3,37 @@ Embedding generation for the three Qdrant collections.
+ Swap this implementation for the team's shared embedding endpoint once it exists —
+ nothing else in kb/ or subagents/ needs to change (they only call embed_text()).
+ """
++import asyncio
++
+ from sentence_transformers import SentenceTransformer
+ 
+-_model = SentenceTransformer("all-MiniLM-L6-v2")
+ EMBEDDING_DIM = 384  # matches all-MiniLM-L6-v2 output size
+ 
++# Lazy-loaded, same pattern as rag_evaluators._get_relevance_cross_encoder().
++# Loading eagerly at module import time meant *any* import of kb.retrieval /
++# kb.qdrant_store (including from offline unit tests that never call
++# embed_text, e.g. evaluation/tests/test_rag_evaluators_unit.py) required a
++# live connection to huggingface.co to download the model, and failed hard
++# with an OSError if that network call didn't succeed -- turning a pure
++# metric-logic test into a flaky network test, and in a sandboxed/restricted
++# CI runner turning it into a guaranteed collection error. Deferring the
++# download to first real use means only code paths that actually embed text
++# pay that cost or that risk.
++_model = None
++
++
++def _get_model() -> "SentenceTransformer":
++    global _model
++    if _model is None:
++        _model = SentenceTransformer("all-MiniLM-L6-v2")
++    return _model
++
+ 
+ async def embed_text(text: str) -> list[float]:
+-    return _model.encode(text, normalize_embeddings=True).tolist()
+\ No newline at end of file
++    # SentenceTransformer.encode is synchronous/CPU-bound -- offload it so
++    # this coroutine doesn't block the event loop other capture_* calls share
++    # (same reasoning as rag_evaluators._score_relevance_pairs).
++    model = _get_model()
++    return await asyncio.to_thread(
++        lambda: model.encode(text, normalize_embeddings=True).tolist()
++    )
+\ No newline at end of file
