@@ -1,0 +1,111 @@
+diff --git a/trait_discovery_agent/.env.example b/trait_discovery_agent/.env.example
+index 250624c..7146b62 100644
+--- a/trait_discovery_agent/.env.example
++++ b/trait_discovery_agent/.env.example
+@@ -84,3 +84,13 @@ LITERATURE_AGENT_URL=http://literature-agent:8000/execute
+ # agent will refuse to call KEGG otherwise.
+ KEGG_COMMERCIAL_USE=false
+ KEGG_COMMERCIAL_USE_LICENSED=false
++
++# LangSmith tracing (Sprint 4 Part C). Leave LANGCHAIN_TRACING_V2 unset/false
++# to run with tracing off (no other code path here depends on it). If you're
++# on the same LangSmith org as the Genome Agent subteam, check with them
++# before minting a second API key -- reuse theirs if this is a shared sprint.
++# Use a project name specific to this agent so traces don't mix with the
++# Genome Agent's, e.g. the default below.
++LANGCHAIN_TRACING_V2=false
++LANGCHAIN_API_KEY=<your-langsmith-api-key>
++LANGCHAIN_PROJECT=trait-discovery-agent-sprint4
+diff --git a/trait_discovery_agent/kb/neo4j_store.py b/trait_discovery_agent/kb/neo4j_store.py
+index 9760ed9..bb24d3b 100644
+--- a/trait_discovery_agent/kb/neo4j_store.py
++++ b/trait_discovery_agent/kb/neo4j_store.py
+@@ -28,6 +28,16 @@ except ModuleNotFoundError:
+     AsyncGraphDatabase = Any  # type: ignore[assignment]
+     _NEO4J_AVAILABLE = False
+ 
++try:
++    from langsmith import traceable
++except ModuleNotFoundError:
++    def traceable(*_args: Any, **_kwargs: Any):  # type: ignore[no-redef]
++        """No-op fallback so the graph write still works if langsmith isn't
++        installed -- mirrors the same fallback in kb/retrieval.py."""
++        def _decorator(fn):
++            return fn
++        return _decorator
++
+ logger = logging.getLogger(__name__)
+ 
+ _driver: Optional[Any] = None
+@@ -68,6 +78,18 @@ def get_driver() -> Any:
+     return _driver
+ 
+ 
++@traceable(
++    run_type="tool",
++    name="neo4j_upsert_trait_gene_relationship",
++    # Static metadata, not an input: the Cypher text is a module-level
++    # constant (never built per-call), so this is the only way for the
++    # actual MERGE statement being run to show up in the span rather than
++    # just its scalar bind params (trait_name/gene_symbol/pmid, which are
++    # already visible as ordinary function-argument inputs). Sprint 4 Part C
++    # step 4 asks for "the Cypher query or relationship being fetched" to be
++    # visible per span -- this is the query half of that.
++    metadata={"cypher": _MERGE_TRAIT_GENE_RELATIONSHIP},
++)
+ async def upsert_trait_gene_relationship(
+     trait_name: str, gene_symbol: str, pmid: str
+ ) -> bool:
+diff --git a/trait_discovery_agent/kb/retrieval.py b/trait_discovery_agent/kb/retrieval.py
+index 3aa904a..19bd947 100644
+--- a/trait_discovery_agent/kb/retrieval.py
++++ b/trait_discovery_agent/kb/retrieval.py
+@@ -12,6 +12,17 @@ except ModuleNotFoundError:
+     FieldCondition = Filter = MatchAny = MatchValue = Range = Any  # type: ignore[assignment]
+     _QDRANT_AVAILABLE = False
+ 
++try:
++    from langsmith import traceable
++except ModuleNotFoundError:
++    def traceable(*_args: Any, **_kwargs: Any):  # type: ignore[no-redef]
++        """No-op fallback so retrieval works even if langsmith isn't installed
++        (e.g. a slim deploy environment) -- tracing is purely observability,
++        never a hard dependency for retrieval to function."""
++        def _decorator(fn):
++            return fn
++        return _decorator
++
+ from kb.embeddings import embed_text
+ from kb.qdrant_store import COLLECTIONS, get_client
+ 
+@@ -75,6 +86,30 @@ def build_filter(**conditions: Any) -> Optional["Filter"]:
+     return Filter(must=must) if must else None
+ 
+ 
++def _summarize_semantic_search_output(results: list["RetrievedDocument"]) -> dict[str, Any]:
++    """Shapes what LangSmith logs for this span's outputs (Sprint 4 Part C,
++    step 4.3): the collection name is already visible in the span's inputs
++    since it's a plain function argument, but the raw list[RetrievedDocument]
++    return value doesn't show the chunk count or per-doc gene_symbol/score at
++    a glance without opening every item, which is exactly what the
++    trace-based spot-check in step 5.1 needs to be fast. This only affects
++    what's recorded in the trace -- the function's actual return value to
++    its caller is untouched.
++    """
++    return {
++        "num_results": len(results),
++        "results": [
++            {
++                "id": doc.id,
++                "score": doc.score,
++                "gene_symbol": doc.payload.get("gene_symbol"),
++            }
++            for doc in results
++        ],
++    }
++
++
++@traceable(run_type="retriever", name="qdrant_semantic_search", process_outputs=_summarize_semantic_search_output)
+ async def semantic_search(
+     collection: str,
+     query_text: str,
