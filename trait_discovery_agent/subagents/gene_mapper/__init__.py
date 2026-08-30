@@ -123,38 +123,16 @@ async def gene_mapper_agent(input: GeneMapperInput) -> GeneMapperOutput:
                     continue
                 entry = fallback
 
-        # ---- cache layer (§6) ----
-        dedup_key = f"go:{entry.go_id}:{entry.gene_symbol}"
-        cached = await get_cached("go_annotations", dedup_key)
-        if cached:
-            annotations.append(entry)
-            continue
-
-        await upsert_point(
-            "go_annotations",
-            dedup_key,
-            text_to_embed=entry.go_name,
-            payload={
-                "gene_symbol": entry.gene_symbol,
-                "go_id": entry.go_id,
-                "go_name": entry.go_name,
-                "source": "GO REST API (QuickGO)",
-                "ingested_at": datetime.now(timezone.utc).isoformat(),
-                "schema_version": SCHEMA_VERSION,
-            },
-        )
-        annotations.append(entry)
-
         # ---- KB enrichment: ingest every other real QuickGO candidate too,
         # not just the one the LLM picked as the answer for *this* trait
-        # (§ retrieval-quality fix). Without this, the Qdrant go_annotations
-        # collection only ever accumulates one GO term per gene no matter
-        # how many biological-process annotations that gene genuinely has,
-        # which structurally caps context_recall well below what real
-        # retrieval quality would support whenever a gene has more than one
-        # true GO term. The winner above is still the only thing returned
-        # in this call's answer -- this only widens what's indexed for
-        # future retrieval/evaluation.
+        # (§ retrieval-quality fix). Deliberately run BEFORE the winner's own
+        # cache check below: once a gene's winning term is cached, the old
+        # code's `continue` on that cache hit meant this block could never
+        # run again for that gene on any subsequent call, permanently
+        # freezing go_annotations at one term/gene regardless of later code
+        # changes. Per-candidate caching inside this loop (get_cached on
+        # cand_key) still makes it a no-op once a given *other* candidate is
+        # itself indexed, so this stays cheap on repeat runs.
         if len(candidates) > 1:
             others = [c for c in candidates if c["go_id"] != entry.go_id]
             other_names = await asyncio.gather(
@@ -180,6 +158,28 @@ async def gene_mapper_agent(input: GeneMapperInput) -> GeneMapperOutput:
                         "schema_version": SCHEMA_VERSION,
                     },
                 )
+
+        # ---- cache layer (§6) ----
+        dedup_key = f"go:{entry.go_id}:{entry.gene_symbol}"
+        cached = await get_cached("go_annotations", dedup_key)
+        if cached:
+            annotations.append(entry)
+            continue
+
+        await upsert_point(
+            "go_annotations",
+            dedup_key,
+            text_to_embed=entry.go_name,
+            payload={
+                "gene_symbol": entry.gene_symbol,
+                "go_id": entry.go_id,
+                "go_name": entry.go_name,
+                "source": "GO REST API (QuickGO)",
+                "ingested_at": datetime.now(timezone.utc).isoformat(),
+                "schema_version": SCHEMA_VERSION,
+            },
+        )
+        annotations.append(entry)
 
     # §9: FAILED if no annotations resolved OR any gene is unmatched
     status = AgentStatus.FAILED if (not annotations or unmatched) else AgentStatus.COMPLETED
