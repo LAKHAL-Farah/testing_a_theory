@@ -119,6 +119,19 @@ class NodeCapture:
     query_text: str
     context_chunks: list[RetrievedDocument] = field(default_factory=list)
     answer_claims: list[str] = field(default_factory=list)
+    # Separate from answer_claims on purpose: faithfulness/context_recall
+    # need the bare, literally-retrieved fact (does this term/summary trace
+    # back to a retrieved chunk?), while answer_relevancy needs something
+    # that reads as a passage (see rag_evaluators._claim_as_passage). Folding
+    # the LLM's free-text reasoning into answer_claims made faithfulness
+    # collapse (go_annotations 1.00 -> 0.00, kegg_pathways 1.00 -> 0.33) --
+    # the reasoning legitimately introduces words absent from the retrieved
+    # chunk, which token-overlap faithfulness reads as hallucination even
+    # though the *fact itself* (the picked term) is still fully grounded.
+    # Defaults to answer_claims for nodes with nothing extra to add
+    # (protein_data, literature_support already return sentence-shaped
+    # text); gene_mapper/pathways override it below with name+reasoning.
+    relevancy_claims: list[str] = field(default_factory=list)
     raw_output: Any = None
     error: Optional[str] = None
     # True when zero claims is a genuine "nothing to report" outcome (no
@@ -180,7 +193,19 @@ async def capture_gene_mapper(gene: str, trait_name: str, species_name: str, top
             context={"uniprot_accessions": {gene: accession}},
         ))
         cap.raw_output = out
-        cap.answer_claims = [a.go_name for a in out.go_annotations if a.gene_symbol == gene]
+        picks = [a for a in out.go_annotations if a.gene_symbol == gene]
+        # answer_claims stays the bare go_name: it's the literal fact that
+        # must trace back to a retrieved chunk (faithfulness/context_recall).
+        cap.answer_claims = [a.go_name for a in picks]
+        # relevancy_claims adds the LLM's own reasoning where one exists
+        # (multi-candidate pick) -- see NodeCapture.relevancy_claims and
+        # rag_evaluators._claim_as_passage for why a bare term needs this to
+        # read as a passage. Single-candidate/fallback picks have no
+        # reasoning to add, so those fall back to the bare go_name too.
+        cap.relevancy_claims = [
+            f"{a.go_name}. {a.reasoning}".strip() if a.reasoning else a.go_name
+            for a in picks
+        ]
         cap.unresolved = not cap.answer_claims
     except Exception as exc:  # pragma: no cover - live-dependency failures surface as eval findings
         cap.error = f"{type(exc).__name__}: {exc}"
@@ -213,7 +238,14 @@ async def capture_pathways(gene: str, trait_name: str, species_name: str, top_k:
             context={"kegg_gene_ids": {gene: kegg_gene_id}},
         ))
         cap.raw_output = out
+        # Same split as capture_gene_mapper: bare pathway_name for
+        # faithfulness/context_recall grounding, name+reasoning for
+        # answer_relevancy's passage-shaped scoring.
         cap.answer_claims = [p.pathway_name for p in out.pathways]
+        cap.relevancy_claims = [
+            f"{p.pathway_name}. {p.reasoning}".strip() if p.reasoning else p.pathway_name
+            for p in out.pathways
+        ]
         cap.unresolved = not cap.answer_claims
     except Exception as exc:  # pragma: no cover
         cap.error = f"{type(exc).__name__}: {exc}"

@@ -98,7 +98,12 @@ async def run_one_node(node: str, case: dict) -> dict[str, Any]:
     # still recorded (see "resolution rate" in the scorecard) just not
     # blended into this average.
     if not cap.unresolved:
-        result["answer_relevancy"] = asdict(await answer_relevancy(cap.answer_claims, gene, trait_name))
+        # relevancy_claims falls back to answer_claims for nodes that don't
+        # set it explicitly (protein_data, literature_support already
+        # produce sentence-shaped text with nothing extra to add -- see
+        # NodeCapture.relevancy_claims).
+        relevancy_input = cap.relevancy_claims or cap.answer_claims
+        result["answer_relevancy"] = asdict(await answer_relevancy(relevancy_input, gene, trait_name))
     if node in NODE_TO_EXPECTED_KEY:
         expected_terms = case.get(NODE_TO_EXPECTED_KEY[node]) or []
         result["context_recall"] = asdict(context_recall(expected_terms, cap.context_chunks))

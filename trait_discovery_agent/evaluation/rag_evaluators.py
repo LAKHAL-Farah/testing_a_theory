@@ -123,6 +123,42 @@ def _score_relevance_pairs(query: str, claims: list[str]) -> list[float]:
     return sigmoid_scores
 
 
+def _claim_as_passage(gene: str, claim: str) -> str:
+    """Turn a bare claim into something that reads as a passage.
+
+    cross-encoder/ms-marco-MiniLM-L-6-v2 was trained on MS MARCO web
+    query/passage pairs: full sentences competing for search-engine click
+    relevance. A short controlled-vocabulary fragment like a GO term name
+    ("keratinization") or a KEGG pathway title ("Thermogenesis - Mus
+    musculus (house mouse)") has no verb, no mention of the gene, and no
+    mention of the trait -- it doesn't resemble a passage at all, so the
+    model scores it as noise (raw logit around -10 to -11 in practice)
+    regardless of whether it's actually the correct answer. Confirmed via
+    RAG_EVAL_DEBUG_RELEVANCY logging: the *longer*, sentence-shaped claims
+    in the very same batches (full UniProt function paragraphs, literature
+    summaries that spell out "links FGF5 to hair length") score meaningfully
+    higher, and none of that gap tracks with correctness -- every claim
+    checked by hand was correct.
+
+    The fix restates *which gene* the claim came from -- something the
+    pipeline already knows for certain, since every claim scored here is
+    already attached to one specific queried gene -- as an explicit
+    sentence subject, e.g. "keratinization" becomes "KRT71: keratinization
+    is reported.". It deliberately does NOT also splice trait_name into
+    every claim: whether a claim actually relates to the trait is exactly
+    the thing this metric is supposed to judge, so forcing the trait's
+    words into every passage would inflate every score uniformly rather
+    than fix the length/style bias, and would make a genuinely off-topic
+    claim (e.g. a pathway with nothing to do with the queried trait) look
+    on-topic just because the wrapper said so. Only the gene, and the
+    claim's own text verbatim, go in.
+    """
+    claim = (claim or "").strip()
+    if not claim:
+        return claim
+    return f"{gene}: {claim} is reported."
+
+
 def _tokenize(text: str) -> set[str]:
     words = re.findall(r"[a-z0-9]+", (text or "").lower())
     return {w for w in words if w not in _STOPWORDS and len(w) > 1}
@@ -133,7 +169,10 @@ def _chunk_text(chunk: RetrievedDocument) -> str:
     payload = chunk.payload or {}
     parts = [
         str(payload.get(k, ""))
-        for k in ("go_name", "pathway_name", "function_summary", "title", "short_summary", "reasoning")
+        for k in (
+            "go_name", "pathway_name", "protein_name", "function_summary",
+            "title", "short_summary", "reasoning",
+        )
     ]
     return " ".join(p for p in parts if p)
 
@@ -207,10 +246,16 @@ async def answer_relevancy(answer_claims: list[str], gene: str, trait_name: str)
         return MetricResult(score=0.0, detail="no answer produced")
 
     query = f"What is the role of {gene} in {trait_name}?"
+    # Bare fragments (GO term names, KEGG pathway titles) don't read as
+    # passages to a cross-encoder trained on MS MARCO passages -- see
+    # _claim_as_passage for why -- so restate each one as a short sentence
+    # before scoring. off_topic/detail below still report the *original*
+    # claim text so the scorecard reads naturally.
+    passages = [_claim_as_passage(gene, claim) for claim in answer_claims]
     # CrossEncoder.predict is a synchronous, CPU-bound call -- offload it so
     # this coroutine doesn't block the event loop the other capture_* calls
     # in run_eval.py share.
-    scores = await asyncio.to_thread(_score_relevance_pairs, query, answer_claims)
+    scores = await asyncio.to_thread(_score_relevance_pairs, query, passages)
 
     off_topic = [claim for claim, sim in zip(answer_claims, scores) if sim < _RELEVANCY_OFF_TOPIC_THRESHOLD]
     score = sum(scores) / len(scores)

@@ -111,7 +111,7 @@ async def gene_mapper_agent(input: GeneMapperInput) -> GeneMapperOutput:
                         f"LLM picked invalid go_id {go_id} not in {valid_ids}"
                     )
                 logger.info("LLM picked %s (%s) for %s: %s", go_id, go_name, gene, reasoning)
-                entry = GOAnnotation(gene_symbol=gene, go_id=go_id, go_name=go_name)
+                entry = GOAnnotation(gene_symbol=gene, go_id=go_id, go_name=go_name, reasoning=reasoning)
             except Exception as exc:
                 # ---- LLM/NIM unavailable or invalid → deterministic fallback (§9) ----
                 logger.warning(
