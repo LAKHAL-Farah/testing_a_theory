@@ -109,15 +109,31 @@ async def _select_protein_for_gene(
 
     # --- several hits: LLM pick via bind_tools (§8) ---
     try:
-        accession, protein_name, function_summary, reasoning = await _llm_pick_protein(
+        accession, _llm_protein_name, _llm_function_summary, reasoning = await _llm_pick_protein(
             trait_name, gene, candidates, tax_id
         )
         # --- grounding rule (§0.1): validate against actual tool output ---
-        valid_accessions = {c["source_accession"] for c in candidates}
-        if accession not in valid_accessions:
+        by_accession = {c["source_accession"]: c for c in candidates}
+        if accession not in by_accession:
             raise RuntimeError(
-                f"LLM picked invalid source_accession {accession} not in {valid_accessions}"
+                f"LLM picked invalid source_accession {accession} not in {set(by_accession)}"
             )
+        # Use the ORIGINAL candidate's protein_name/function_summary, not the
+        # model's own retyped copy of them. The grounding check above only
+        # ever validated the accession -- nothing stopped the model from
+        # paraphrasing or shortening function_summary when it echoed it back
+        # in its JSON reply, and that paraphrase is what got embedded into
+        # Qdrant (text_to_embed=entry.function_summary) and scored for
+        # context_recall. Since this collection is dominated by single-
+        # candidate genes (no "other candidates" to enrich against), the
+        # winner's fidelity to the real UniProt text *is* most of the recall
+        # score, so a dropped phrase here reads as a structural retrieval
+        # ceiling rather than the one-off paraphrasing loss it actually is.
+        # Pulling straight from `candidates` mirrors how the "other
+        # candidates" enrichment below already avoids this exact risk.
+        picked = by_accession[accession]
+        protein_name = picked["protein_name"]
+        function_summary = picked["function_summary"]
         logger.info(
             "LLM picked %s (%s) for %s: %s", accession, protein_name, gene, reasoning
         )
@@ -169,12 +185,17 @@ async def protein_data_agent(input: ProteinDataInput) -> ProteinDataOutput:
             continue
 
         # --- Cache / dedup (§6) ------------------------
+        # No separate "already cached -> skip" gate here: upsert_point()
+        # already does the right thing internally (hash-compares
+        # text_to_embed against what's stored and only re-embeds on a real
+        # change, see kb/qdrant_store.py). A gate here that short-circuits
+        # on mere *existence* rather than content would silently freeze
+        # whatever text got embedded first -- exactly what happened to the
+        # LLM-paraphrased function_summary before the fidelity fix in
+        # _select_protein_for_gene above: the corrected text could never
+        # reach Qdrant because this line always saw an existing point for
+        # that accession and returned before upsert_point was even called.
         dedup_key = f"uniprot:{entry.source_accession}:{tax_id}"
-        cached = await get_cached("uniprot_proteins", dedup_key)
-        if cached:
-            proteins.append(entry)
-            continue
-
         await upsert_point(
             "uniprot_proteins",
             dedup_key,
