@@ -17,6 +17,13 @@ async def get_genome_metadata_node(state: GenomeAgentState) -> dict[str, Any]:
     assembly_id = state.assembly_id
     logger.info("[get_genome_metadata] fetching metadata for assembly=%r", assembly_id)
 
+    # Logged before the call, not after: a case that simulates a timeout on
+    # this exact call still needs check_tool_selection to see the tool was
+    # attempted (see test_cases.yaml: tool_failure_ncbi_timeout expects
+    # ncbi_assembly_stats in expected_tool_calls even though it's the tool
+    # being made to fail).
+    tool_calls = [{"tool": "ncbi_assembly_stats", "args": {"assembly_id": assembly_id}}]
+
     try:
         result = await get_genome_metadata(assembly_id)
     except Exception as exc:
@@ -24,6 +31,7 @@ async def get_genome_metadata_node(state: GenomeAgentState) -> dict[str, Any]:
             "errors": [*state.errors, f"get_genome_metadata raised an exception: {exc}"],
             "metadata": None,
             "_metadata_done": True,
+            "tool_calls_log": tool_calls,
         }
 
     if result.get("genome_size_bp") is None:
@@ -34,6 +42,7 @@ async def get_genome_metadata_node(state: GenomeAgentState) -> dict[str, Any]:
             ],
             "metadata": None,
             "_metadata_done": True,
+            "tool_calls_log": tool_calls,
         }
 
     # ── Detect gaps / unresolved regions ──────────────────────────────
@@ -73,6 +82,7 @@ async def get_genome_metadata_node(state: GenomeAgentState) -> dict[str, Any]:
         "metadata": metadata_out,
         "_metadata_done": True,
         "reconstruction_need": reconstruction_need,
+        "tool_calls_log": tool_calls,
     }
 
 
@@ -88,6 +98,11 @@ async def get_gene_annotation_node(state: GenomeAgentState) -> dict[str, Any]:
         user_question,
     )
 
+    # Logged before the call for the same reason as ncbi_assembly_stats
+    # above — tool_failure_gene_annotation_timeout expects ncbi_gene_list to
+    # show up as attempted even though it's the call being made to fail.
+    tool_calls = [{"tool": "ncbi_gene_list", "args": {"assembly_id": assembly_id}}]
+
     try:
         result = await get_gene_annotation(assembly_id, user_question=user_question)
     except Exception as exc:
@@ -98,6 +113,7 @@ async def get_gene_annotation_node(state: GenomeAgentState) -> dict[str, Any]:
             ],
             "annotation": None,
             "_annotation_done": True,
+            "tool_calls_log": tool_calls,
         }
 
     if not result.get("gene_list"):
@@ -108,9 +124,11 @@ async def get_gene_annotation_node(state: GenomeAgentState) -> dict[str, Any]:
             ],
             "annotation": result,
             "_annotation_done": True,
+            "tool_calls_log": tool_calls,
         }
 
     return {
         "annotation": result,
         "_annotation_done": True,
+        "tool_calls_log": tool_calls,
     }

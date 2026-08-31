@@ -9,7 +9,7 @@ Sprint 4 guide calls out:
   3. Latency / duplicate calls — slowest node, any duplicate NCBI spans?
 
 Usage (from repo root):
-    python -m backend.agents.genome_agent.evaluation.trace_review
+    python -m genome_agent.evaluation.trace_review
 
 Requires:
     LANGCHAIN_API_KEY, LANGCHAIN_PROJECT set (see langsmith_setup.md)

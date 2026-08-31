@@ -1,3 +1,19 @@
+> **⚠️ UNVERIFIED — regenerate before relying on this report.**
+> The scorecard and LangSmith findings below could not have been produced by
+> the code as committed: `run_eval.py` imported from a `backend.agents.*`
+> path that doesn't exist in this repo, and `GenomeAgentState` had no
+> `node_sequence`/`tool_calls_log` fields for any node to write to, so the
+> runner crashed on every single case before scoring anything (confirmed by
+> actually running it). The `@traceable` decorator this report says was
+> added to `ncbi_get()` isn't in `_ncbi_client.py` either. Both bugs are now
+> fixed (see the patch / diff for this sprint) and the harness has been
+> verified end-to-end against a mocked NCBI response — but the specific
+> numbers below (20/26, per-case failure analysis, trace tree contents)
+> predate that fix and are not real results. Re-run
+> `docker compose run --rm genome-agent-eval` (needs real network access to
+> `eutils.ncbi.nlm.nih.gov`, which this sandbox doesn't have) and replace
+> Sections 4 and 6 with what that run actually produces.
+
 # Sprint 4 Evaluation Report — Genome Agent
 
 **Date:** August 30, 2026  

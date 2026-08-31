@@ -10,10 +10,10 @@ Exactly 4 functions as the guide specifies:
     main()                   loops all cases, writes results/scorecard_<ts>.json
 
 Usage (from repo root):
-    python -m backend.agents.genome_agent.evaluation.run_eval
-    python -m backend.agents.genome_agent.evaluation.run_eval --case happy_human_genome_size
-    python -m backend.agents.genome_agent.evaluation.run_eval --category scaffold_escalation
-    python -m backend.agents.genome_agent.evaluation.run_eval --fast
+    python -m genome_agent.evaluation.run_eval
+    python -m genome_agent.evaluation.run_eval --case happy_human_genome_size
+    python -m genome_agent.evaluation.run_eval --category scaffold_escalation
+    python -m genome_agent.evaluation.run_eval --fast
 """
 
 from __future__ import annotations
@@ -61,16 +61,31 @@ def load_cases(path: Path = _CASES) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_failure_patch(tool_name: str, error_cls: type) -> contextlib.AbstractContextManager:
-    """Patch one NCBI helper to raise the given error class."""
+    """Patch one NCBI helper to raise the given error class.
+
+    Patch targets are where the name is *looked up at call time*, not where
+    it's defined — mock.patch only intercepts a call if you patch the
+    reference the caller actually uses. _search_taxonomy_core /
+    _search_assembly_by_taxid_core / search_genes are all called from
+    within their own defining module (species_resolver.py,
+    gene_annotation.py respectively), so patching them at their defining
+    module path works. get_genome_metadata is different: genome_data_nodes.py
+    imports it with `from ...subagents.genome_metadata import
+    get_genome_metadata`, which binds its own local name at import time —
+    patching subagents.genome_metadata.get_genome_metadata would leave that
+    already-bound reference untouched and the simulated failure would
+    silently never fire, so this one has to be patched where it's called
+    from instead.
+    """
     _PATHS = {
         "ncbi_taxonomy_search":
-            "backend.agents.genome_agent.subagents.species_resolver._search_taxonomy_core",
+            "genome_agent.subagents.species_resolver._search_taxonomy_core",
         "ncbi_assembly_lookup":
-            "backend.agents.genome_agent.subagents.species_resolver._search_assembly_by_taxid_core",
+            "genome_agent.subagents.species_resolver._search_assembly_by_taxid_core",
         "ncbi_assembly_stats":
-            "backend.agents.genome_agent.subagents.genome_metadata.get_genome_metadata",
+            "genome_agent.workflows.nodes.genome_data_nodes.get_genome_metadata",
         "ncbi_gene_list":
-            "backend.agents.genome_agent.subagents.gene_annotation.search_genes",
+            "genome_agent.subagents.gene_annotation.search_genes",
     }
     path = _PATHS.get(tool_name)
     if not path:
@@ -83,7 +98,7 @@ def _make_failure_patch(tool_name: str, error_cls: type) -> contextlib.AbstractC
 
 
 async def _run_case_async(case: dict) -> EvalResult:
-    from backend.agents.genome_agent.orchestrator import GenomeAgentLangGraphOrchestrator
+    from ..orchestrator import GenomeAgentLangGraphOrchestrator
 
     species_hint = case.get("species_hint") or case.get("input", "")
     simulate     = case.get("simulate_failure") or {}

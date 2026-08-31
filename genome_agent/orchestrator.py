@@ -35,6 +35,8 @@ Graph shape::
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -49,6 +51,35 @@ from .workflows.nodes.reconstruction_resolver_node import reconstruction_resolve
 from .workflows.nodes.species_resolver_node import species_resolver_node
 from .workflows.nodes.visualization_node import generate_visualization_node
 from .workflows.state import GenomeAgentState
+
+
+# ------------------------------------------------------------------
+# Evaluation instrumentation (Sprint 4, Part A Step 4)
+#
+# The guide asks for "lightweight logging inside each node that appends
+# its own name to a list in state". Rather than editing every node body in
+# workflows/nodes/ (8 files, easy for a 9th node added later to be missed),
+# this wraps each node once, here, at graph-build time — one place that
+# can't drift out of sync with the node list below. Works for both async
+# and sync node callables (error_end_node is sync; everything else async).
+# ------------------------------------------------------------------
+
+
+def _track(name: str, fn: Callable[[GenomeAgentState], Any]) -> Callable[[GenomeAgentState], Awaitable[dict[str, Any]]]:
+    async def _wrapped(state: GenomeAgentState) -> dict[str, Any]:
+        result = fn(state)
+        if inspect.isawaitable(result):
+            result = await result
+        update = dict(result or {})
+        # Single-item list: node_sequence's reducer is operator.add, so
+        # LangGraph concatenates this onto the accumulated sequence itself —
+        # returning [*state.node_sequence, name] here would double-count
+        # everything already accumulated (same pitfall as errors' pattern
+        # elsewhere in this codebase; don't copy it for new fields).
+        update.setdefault("node_sequence", [name])
+        return update
+
+    return _wrapped
 
 
 # ------------------------------------------------------------------
@@ -109,18 +140,18 @@ def _route_after_visualization(state: GenomeAgentState) -> str:
 def build_genome_graph() -> CompiledStateGraph:
     graph = StateGraph(GenomeAgentState)
 
-    graph.add_node("query_router", query_router_node)
-    graph.add_node("species_resolver", species_resolver_node)
-    graph.add_node("parallel_kickoff", _parallel_kickoff_node)
-    graph.add_node("get_genome_metadata", get_genome_metadata_node)
-    graph.add_node("get_gene_annotation", get_gene_annotation_node)
-    graph.add_node("join_parallel", _join_parallel_node)
-    graph.add_node("generate_visualization", generate_visualization_node)
-    graph.add_node("find_target_gaps", find_target_gaps_node)
-    graph.add_node("reconstruction_resolver", reconstruction_resolver_node)
-    graph.add_node("capability_resolver", capability_resolver_node)
-    graph.add_node("explanation_writer", explanation_writer_node)
-    graph.add_node("error_end", error_end_node)
+    graph.add_node("query_router", _track("query_router", query_router_node))
+    graph.add_node("species_resolver", _track("species_resolver", species_resolver_node))
+    graph.add_node("parallel_kickoff", _track("parallel_kickoff", _parallel_kickoff_node))
+    graph.add_node("get_genome_metadata", _track("get_genome_metadata", get_genome_metadata_node))
+    graph.add_node("get_gene_annotation", _track("get_gene_annotation", get_gene_annotation_node))
+    graph.add_node("join_parallel", _track("join_parallel", _join_parallel_node))
+    graph.add_node("generate_visualization", _track("generate_visualization", generate_visualization_node))
+    graph.add_node("find_target_gaps", _track("find_target_gaps", find_target_gaps_node))
+    graph.add_node("reconstruction_resolver", _track("reconstruction_resolver", reconstruction_resolver_node))
+    graph.add_node("capability_resolver", _track("capability_resolver", capability_resolver_node))
+    graph.add_node("explanation_writer", _track("explanation_writer", explanation_writer_node))
+    graph.add_node("error_end", _track("error_end", error_end_node))
 
     graph.add_edge(START, "query_router")
 
